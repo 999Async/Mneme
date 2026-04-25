@@ -1,5 +1,7 @@
 # Mneme 项目 Claude Code 快速导航
 
+环境激活：`source .venv/bin/activate`
+
 ## 📁 项目结构说明
 
 ### docs/ 文件夹内容概览
