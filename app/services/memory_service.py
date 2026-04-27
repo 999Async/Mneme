@@ -46,8 +46,19 @@ async def create_memory(
         detail={"source_message_id": source_message_id, "confidence": confidence},
     )
     db.add(log)
+
+    # Generate embedding for vector search
+    from app.llm.embedding import encode as encode_embedding
+    embedding = await encode_embedding(content)
+    if embedding is not None:
+        memory.embedding = embedding
+
     await db.commit()
     await db.refresh(memory)
+
+    from app.services.search_service import invalidate_search_cache
+    await invalidate_search_cache()
+
     return memory
 
 
@@ -123,6 +134,9 @@ async def supersede_memory(db: AsyncSession, old_memory: Memory, new_memory_id: 
     db.add(log)
     await db.commit()
 
+    from app.services.search_service import invalidate_search_cache
+    await invalidate_search_cache()
+
 
 async def soft_delete(db: AsyncSession, memory_id: str) -> bool:
     """软删除记忆"""
@@ -135,6 +149,9 @@ async def soft_delete(db: AsyncSession, memory_id: str) -> bool:
     log = MemoryLog(memory_id=memory_id, action="forget", detail={"reason": "user delete"})
     db.add(log)
     await db.commit()
+
+    from app.services.search_service import invalidate_search_cache
+    await invalidate_search_cache()
     return True
 
 
@@ -170,4 +187,7 @@ async def review_memory(
     db.add(log)
     await db.commit()
     await db.refresh(memory)
+
+    from app.services.search_service import invalidate_search_cache
+    await invalidate_search_cache()
     return memory

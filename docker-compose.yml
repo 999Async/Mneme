@@ -5,16 +5,19 @@ services:
       - "0.0.0.0:3001:3001"
     environment:
       - DATABASE_URL=postgresql+asyncpg://mneme:${PG_PASSWORD:-mneme123}@postgres:5432/mneme
+      - REDIS_URL=redis://redis:6379/0
       - FEISHU_APP_ID=${FEISHU_APP_ID:-}
       - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
       - MNEME_SERVICE_TOKEN=${MNEME_SERVICE_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   postgres:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_DB: mneme
       POSTGRES_USER: mneme
@@ -30,5 +33,14 @@ services:
       retries: 5
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  redisdata:

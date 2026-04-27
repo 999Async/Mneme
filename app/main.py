@@ -3,6 +3,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from sqlalchemy import text
+from fastapi.responses import JSONResponse
+
 from app.config import settings
 
 
@@ -13,6 +16,8 @@ async def lifespan(app: FastAPI):
     from app.models import Base
 
     async with engine.begin() as conn:
+        # Enable pgvector extension for PostgreSQL
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
     yield
 
