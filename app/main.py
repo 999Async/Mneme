@@ -27,8 +27,10 @@ app = FastAPI(
 # Auth middleware
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    # Skip auth for health check and docs
+    # Skip auth for health check and docs, or when no token configured
     if request.url.path in ("/health", "/docs", "/openapi.json", "/redoc"):
+        return await call_next(request)
+    if not settings.mneme_service_token:
         return await call_next(request)
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")

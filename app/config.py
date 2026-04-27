@@ -6,8 +6,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 3001
 
-    # PostgreSQL
-    database_url: str = "postgresql+asyncpg://mneme:mneme123@localhost:5432/mneme"
+    # PostgreSQL (本地测试用 sqlite+aiosqlite)
+    database_url: str = "sqlite+aiosqlite:///./test.db"
 
     # Feishu (Python 直接调飞书 API 推送卡片)
     feishu_app_id: str = ""
