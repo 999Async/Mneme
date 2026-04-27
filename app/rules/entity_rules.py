@@ -1,9 +1,27 @@
-"""Entity 提取正则/模式 — PRD 附录 C"""
+"""Entity 提取正则/模式 — PRD 附录 C（已扩展）"""
 
 import re
 
-# 人员名模式：中文 2-4 字 + "同学/总/老师/经理" 等后缀
-PERSON_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,4}(同学|总|老师|经理|主管|姐|哥|领导)")
+# 人员名模式：中文 1-4 字 + "同学/总/老师/经理" 等后缀（支持 "张同学"、"王总"）
+PERSON_PATTERN = re.compile(r"[\u4e00-\u9fff]{1,4}(同学|总|老师|经理|主管|姐|哥|领导)")
+
+# @提及模式：@张三, @Mike_Smith
+MENTION_PATTERN = re.compile(r"@[\u4e00-\u9fffa-zA-Z0-9_]+")
+
+# 英文名模式：Mike, Mike Smith（需排除 MongoDB/MySQL 等技术词）
+# 使用负向前瞻/后瞻避免匹配到技术术语内部
+ENGLISH_NAME_BLACKLIST = {
+    "Mongo", "MongoDB", "MySQL", "Redis", "PostgreSQL", "SQLite",
+    "Kafka", "RabbitMQ", "Elasticsearch", "Kubernetes", "Docker",
+    "Github", "Gitlab", "Bitbucket", "Jenkins", "Terraform",
+    "Ansible", "Nginx", "Apache", "Linux", "MacOS", "Windows",
+}
+ENGLISH_NAME_PATTERN = re.compile(
+    r"(?<![a-zA-Z])([A-Z][a-z]+(?: [A-Z][a-z]+)?)(?![a-zA-Z])"
+)
+
+# 昵称模式：老王, 小李
+NICKNAME_PATTERN = re.compile(r"[老小][\u4e00-\u9fff]")
 
 # 项目名模式：含 "项目" 或大写字母+数字组合
 PROJECT_PATTERN = re.compile(r"([\u4e00-\u9fff]{2,8}项目|[A-Z][A-Z0-9\-]{1,20})")
@@ -21,35 +39,62 @@ DATE_PATTERN = re.compile(
 # 配置/密钥类
 CONFIG_PATTERN = re.compile(r"(sk-[a-zA-Z0-9]{10,}|api[_-]?key|token|secret|password|密码|密钥)", re.IGNORECASE)
 
-# 敏感信息（用于脱敏）
+# 敏感信息（用于脱敏）— 扩展版
 SENSITIVE_PATTERN = re.compile(
     r"(sk-[a-zA-Z0-9]{10,}|"
     r"(?:password|passwd|pwd)\s*[=:]\s*\S+|"
-    r"(?:token|secret|key)\s*[=:]\s*[a-zA-Z0-9\-_]{10,})",
+    r"(?:token|secret|key)\s*[=:]\s*[a-zA-Z0-9\-_]{10,}|"
+    r"eyJ[A-Za-z0-9_-]{10,}|"
+    r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
+    r"[\w-]+\.(internal|local|staging|test)\b|"
+    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
     re.IGNORECASE,
 )
 
 
 def extract_entities(content: str) -> dict[str, list[str] | dict]:
-    """从消息中提取实体
+    """从消息中提取实体（扩展版：支持@提及、英文名、昵称）
 
     Returns:
         {"person": [...], "project": [...], "date": [...], "config": [...]}
     """
-    entities: dict[str, list[str] | dict] = {}
+    entities: dict[str, list[str]] = {}
 
-    persons = list(set(PERSON_PATTERN.findall(content) or []))
+    # 人员名提取（多模式合并）
+    persons = set()
+
+    # 1. 中文 + 后缀
+    for match in PERSON_PATTERN.finditer(content):
+        persons.add(match.group(0))
+
+    # 2. @提及
+    for match in MENTION_PATTERN.finditer(content):
+        persons.add(match.group(0))
+
+    # 3. 昵称（老王, 小李）
+    for match in NICKNAME_PATTERN.finditer(content):
+        persons.add(match.group(0))
+
+    # 4. 英文名（排除技术术语）
+    for match in ENGLISH_NAME_PATTERN.finditer(content):
+        name = match.group(1)
+        if name not in ENGLISH_NAME_BLACKLIST and len(name) >= 2:
+            persons.add(name)
+
     if persons:
-        entities["person"] = persons
+        entities["person"] = list(persons)
 
+    # 项目名
     projects = list(set(PROJECT_PATTERN.findall(content) or []))
     if projects:
         entities["project"] = projects
 
+    # 日期
     dates = list(set(DATE_PATTERN.findall(content) or []))
     if dates:
         entities["date"] = dates
 
+    # 配置/密钥
     configs = list(set(CONFIG_PATTERN.findall(content) or []))
     if configs:
         entities["config"] = configs
@@ -68,7 +113,7 @@ def extract_keywords(content: str) -> list[str]:
 
 
 def desensitize(content: str) -> str:
-    """敏感信息脱敏"""
+    """敏感信息脱敏（扩展版：JWT/IP/内部域名/Email）"""
     def mask(m):
         val = m.group(0)
         if len(val) <= 8:
