@@ -171,7 +171,7 @@ async def llm_verify_conflict(
         }
 
     # 解析 LLM 结果
-    llm_conflicts = result["data"].get("conflicts", [])
+    llm_conflicts = result["data"].get("items", result["data"].get("conflicts", []))
     verified = []
     for item in llm_conflicts:
         idx = item.get("index", -1)

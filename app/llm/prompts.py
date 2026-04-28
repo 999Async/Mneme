@@ -15,7 +15,7 @@ CONFLICT_DETECTION_PROMPT = """你是一个记忆冲突检测助手。判断新�
 
 返回 JSON：
 {{
-  "conflicts": [
+  "items": [
     {{
       "index": 0,
       "has_conflict": true/false,

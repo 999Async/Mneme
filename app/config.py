@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     push_window_start: int = 9
     push_window_end: int = 19
 
+    # Buffer params (Module E)
+    buffer_max_size: int = 20           # 数量触发阈值
+    buffer_min_size: int = 2            # 想要触发的最低数量阈值
+    buffer_ttl_seconds: int = 300       # 5 分钟静默触发
+    buffer_key_prefix: str = "mneme:buffer"  # Redis key 前缀
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

@@ -128,29 +128,18 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             "relevant_memories": [],
         })
 
-    # --- AUTO_EXTRACT (非 @Mneme 消息) ---
+    # --- AUTO_EXTRACT (非 @Mneme 消息) → 缓冲 ---
     if intent == intent_service.Intent.AUTO_EXTRACT:
         owner_id = _parse_owner_id(body.session_key)
-        extracted = extraction_service.extract(body.content)
-        if extracted:
-            auto_result = await detect_conflicts_with_llm(
-                db, content=extracted.content, tags=extracted.tags,
-                owner_id=owner_id, scope="group",
-            )
-            conflicts = auto_result["conflicts"]
-            memory = await create_memory(
-                db, scope="group", owner_id=owner_id, type=extracted.type,
-                content=extracted.content, tags=extracted.tags,
-                confidence=extracted.confidence,
-                context_snapshot=extracted.context_snapshot,
-            )
-            for conflict in conflicts:
-                from app.services.memory_service import get_memory
-                old = await get_memory(db, conflict["id"])
-                if old:
-                    await supersede_memory(db, old, memory.id)
+        from app.services.message_buffer_service import buffer_message, check_count_trigger, extract_from_buffer
+        result = await buffer_message(owner_id, body.content, role="user", session_key=body.session_key)
 
-        # 返回空，不回复用户（静默处理）
+        if not result["buffered"]:
+            return ok({"action": "none", "reply_text": None, "relevant_memories": []})
+
+        if await check_count_trigger(owner_id):
+            await extract_from_buffer(owner_id, db)
+
         return ok({"action": "none", "reply_text": None, "relevant_memories": []})
 
     # --- PASS ---
@@ -159,43 +148,24 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
 @router.post("/conversation-end")
 async def handle_conversation_end(body: ConversationEndEvent, db: AsyncSession = Depends(get_db)):
-    """Plugin agent_end：对话结束后自动抽取记忆"""
+    """Plugin agent_end：对话结束后缓冲消息并批量提取"""
     if not body.messages:
         return ok({"extracted": 0})
 
     owner_id = _parse_owner_id(body.session_key)
-    extracted_count = 0
+    from app.services.message_buffer_service import buffer_message, extract_from_buffer
 
-    # 遍历最近消息，尝试抽取
-    for msg in body.messages[-5:]:
+    for msg in body.messages:
         content = msg.get("content", "")
         if not content or len(content) < 5:
             continue
         role = msg.get("role", "")
         if role == "assistant":
-            continue  # 不从 bot 回复中抽取
+            continue
+        await buffer_message(owner_id, content, role=role, session_key=body.session_key)
 
-        extracted = extraction_service.extract(content)
-        if extracted:
-            conv_result = await detect_conflicts_with_llm(
-                db, content=extracted.content, tags=extracted.tags,
-                owner_id=owner_id, scope="group",
-            )
-            conflicts = conv_result["conflicts"]
-            memory = await create_memory(
-                db, scope="group", owner_id=owner_id, type=extracted.type,
-                content=extracted.content, tags=extracted.tags,
-                confidence=extracted.confidence,
-                context_snapshot=extracted.context_snapshot,
-            )
-            for conflict in conflicts:
-                from app.services.memory_service import get_memory
-                old = await get_memory(db, conflict["id"])
-                if old:
-                    await supersede_memory(db, old, memory.id)
-            extracted_count += 1
-
-    return ok({"extracted": extracted_count})
+    result = await extract_from_buffer(owner_id, db, force=True)
+    return ok({"extracted": result["extracted"]})
 
 
 def _parse_owner_id(session_key: str | None) -> str:

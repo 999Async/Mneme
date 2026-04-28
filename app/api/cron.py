@@ -35,3 +35,11 @@ async def get_l2_candidates(
     from app.services.push_service import find_l2_candidates
     candidates = await find_l2_candidates(db, message=current_message, chat_id=chat_id, threshold=threshold)
     return ok({"candidates": candidates})
+
+
+@router.post("/extract-buffers")
+async def cron_extract_buffers(db: AsyncSession = Depends(get_db)):
+    """定时扫描消息缓冲区，提取静默超时的缓冲（每5分钟 Cron 触发）"""
+    from app.services.message_buffer_service import extract_all_buffers
+    result = await extract_all_buffers(db)
+    return ok(result)

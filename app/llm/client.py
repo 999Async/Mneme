@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 
 import httpx
 
@@ -76,30 +77,56 @@ async def chat(
     return {"ok": False, "error": "llm_unavailable", "detail": last_error}
 
 
+def _strip_markdown_json(text: str) -> str:
+    """剥掉 LLM 可能返回的 ```json ... ``` 包裹"""
+    text = text.strip()
+    # 完整包裹: ```json\n{...}\n``` 或 ```\n{...}\n```
+    m = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # 只有开头: ```json\n{...} 或 ```\n{...}
+    m = re.match(r"^```(?:json)?\s*\n?(.*)", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return text
+
+
 async def chat_json(
     messages: list[dict],
     *,
     temperature: float = 0.3,
-    max_tokens: int = 1000,
+    max_tokens: int = 2000,
 ) -> dict:
-    """调用 LLM 并解析 JSON 响应
+    """调用 LLM 并解析 JSON 响应，JSON 解析失败时重试
 
     Returns:
         成功: {"ok": True, "data": dict}
         失败: {"ok": False, "error": str}
     """
-    result = await chat(
-        messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-    )
-    if not result["ok"]:
-        return result
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        result = await chat(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        if not result["ok"]:
+            return result
 
-    try:
-        data = json.loads(result["content"])
-        return {"ok": True, "data": data}
-    except json.JSONDecodeError as e:
-        logger.error("LLM JSON parse error: %s\nContent: %s", e, result["content"][:200])
-        return {"ok": False, "error": "json_parse_error", "detail": str(e)}
+        content = _strip_markdown_json(result["content"])
+
+        try:
+            data = json.loads(content)
+            return {"ok": True, "data": data}
+        except json.JSONDecodeError as e:
+            last_error = e
+            logger.warning(
+                "LLM JSON parse error (attempt %d/%d): %s\nContent: %s",
+                attempt + 1, MAX_RETRIES, e, content[:200],
+            )
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_DELAYS[attempt])
+
+    logger.error("LLM JSON parse failed after %d retries: %s", MAX_RETRIES, last_error)
+    return {"ok": False, "error": "json_parse_error", "detail": str(last_error)}
