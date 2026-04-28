@@ -7,7 +7,7 @@ from app.db.session import get_db
 from app.schemas.common import ok
 from app.schemas.event import ConversationEndEvent, IncomingEvent
 from app.services import intent_service, extraction_service
-from app.services.conflict_service import detect_conflicts
+from app.services.conflict_service import detect_conflicts_with_llm
 from app.services.memory_service import create_memory, supersede_memory
 
 router = APIRouter()
@@ -28,11 +28,12 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         # 解析 owner_id from session_key (格式: "feishu:chat:oc_xxx" or "feishu:p2p:ou_xxx")
         owner_id = _parse_owner_id(body.session_key)
 
-        # 冲突检测
-        conflicts = await detect_conflicts(
+        # 冲突检测（LLM 增强）
+        result = await detect_conflicts_with_llm(
             db, content=extracted.content, tags=extracted.tags,
             owner_id=owner_id, scope=scope,
         )
+        conflicts = result["conflicts"]
 
         # 创建新记忆
         memory = await create_memory(
@@ -56,6 +57,8 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         conflict_info = ""
         if conflicts:
             conflict_info = f"（已更新 {len(conflicts)} 条旧记忆）"
+        if not result.get("llm_available", True):
+            conflict_info += "（⚠️ AI 服务暂时不可用，冲突检测可能不够准确）"
 
         return ok({
             "action": "reply",
@@ -130,10 +133,11 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         owner_id = _parse_owner_id(body.session_key)
         extracted = extraction_service.extract(body.content)
         if extracted:
-            conflicts = await detect_conflicts(
+            auto_result = await detect_conflicts_with_llm(
                 db, content=extracted.content, tags=extracted.tags,
                 owner_id=owner_id, scope="group",
             )
+            conflicts = auto_result["conflicts"]
             memory = await create_memory(
                 db, scope="group", owner_id=owner_id, type=extracted.type,
                 content=extracted.content, tags=extracted.tags,
@@ -173,10 +177,11 @@ async def handle_conversation_end(body: ConversationEndEvent, db: AsyncSession =
 
         extracted = extraction_service.extract(content)
         if extracted:
-            conflicts = await detect_conflicts(
+            conv_result = await detect_conflicts_with_llm(
                 db, content=extracted.content, tags=extracted.tags,
                 owner_id=owner_id, scope="group",
             )
+            conflicts = conv_result["conflicts"]
             memory = await create_memory(
                 db, scope="group", owner_id=owner_id, type=extracted.type,
                 content=extracted.content, tags=extracted.tags,
