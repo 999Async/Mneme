@@ -1,9 +1,10 @@
-from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, JSON
+from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, Index, Integer, String, Text, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
+
+from app.utils.datetime import ms_now
 
 
 class Base(DeclarativeBase):
@@ -36,14 +37,14 @@ class Memory(Base):
     parent_id: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("memories.id"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     superseded_by: Mapped[str | None] = mapped_column(UuidStr, ForeignKey("memories.id"), nullable=True)
-    last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_reviewed_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     source_message_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_chat_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     embedding = mapped_column(Vector(1536), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=ms_now)
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=ms_now, onupdate=ms_now
     )
 
     __table_args__ = (

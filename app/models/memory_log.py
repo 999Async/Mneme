@@ -1,10 +1,10 @@
-from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, JSON
+from sqlalchemy import BigInteger, ForeignKey, Index, String, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.memory import Base, UuidStr
+from app.utils.datetime import ms_now
 
 
 class MemoryLog(Base):
@@ -16,7 +16,7 @@ class MemoryLog(Base):
     )
     action: Mapped[str] = mapped_column(String(20), nullable=False)  # create / review / decay / overwrite / forget
     detail: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=ms_now)
 
     __table_args__ = (
         Index("idx_memory_logs_memory", "memory_id", created_at.desc()),

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.client import chat_json
-from app.llm.prompts import CONFLICT_DETECTION_PROMPT
+from app.llm.prompts import CONFLICT_DETECTION_PROMPT, CONFLICT_SCHEMA
 from app.models import Memory
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ async def detect_conflicts(
             "content": candidate.content,
             "similarity_score": round(score, 3),
             "conflict_reason": "; ".join(reasons) or "综合相似度匹配",
-            "created_at": candidate.created_at.isoformat() if candidate.created_at else "",
+            "created_at": candidate.created_at,
             "needs_llm_verify": score < CONFLICT_THRESHOLD,
         }
         conflicts.append(entry)
@@ -159,7 +159,7 @@ async def llm_verify_conflict(
         {"role": "user", "content": prompt},
     ]
 
-    result = await chat_json(messages, temperature=0.1, max_tokens=800)
+    result = await chat_json(messages, temperature=0.1, max_tokens=800, schema=CONFLICT_SCHEMA)
 
     if not result["ok"]:
         logger.warning("LLM conflict verify failed: %s", result.get("error"))

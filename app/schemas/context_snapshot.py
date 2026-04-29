@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from pydantic import BaseModel
 
 
@@ -15,5 +13,5 @@ class SnapshotResp(BaseModel):
     user_id: str
     chat_id: str
     snapshot: str
-    created_at: datetime
-    expires_at: datetime
+    created_at: int
+    expires_at: int

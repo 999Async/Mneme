@@ -1,12 +1,12 @@
 """记忆 CRUD + 版本链管理"""
 
-from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Memory, MemoryLog
+from app.utils.datetime import ms_now
 
 
 async def create_memory(
@@ -124,7 +124,7 @@ async def supersede_memory(db: AsyncSession, old_memory: Memory, new_memory_id: 
     """将旧记忆标记为被覆写"""
     old_memory.active = False
     old_memory.superseded_by = new_memory_id
-    old_memory.updated_at = datetime.utcnow()
+    old_memory.updated_at = ms_now()
 
     log = MemoryLog(
         memory_id=old_memory.id,
@@ -144,7 +144,7 @@ async def soft_delete(db: AsyncSession, memory_id: str) -> bool:
     if not memory:
         return False
     memory.active = False
-    memory.updated_at = datetime.utcnow()
+    memory.updated_at = ms_now()
 
     log = MemoryLog(memory_id=memory_id, action="forget", detail={"reason": "user delete"})
     db.add(log)
@@ -163,7 +163,7 @@ async def review_memory(
     if not memory:
         return None
 
-    now = datetime.utcnow()
+    now = ms_now()
 
     if action == "review":
         memory.strength = 1.0

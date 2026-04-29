@@ -1,28 +1,27 @@
 """L1/L2 推送候选筛选 + 防抖 + 日上限"""
 
-from datetime import datetime
-
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Memory, PushLog
+from app.utils.datetime import ms_now, ms_to_hour, ms_day_start, ms_to_strftime, MS_24H
 
 
 async def run_l1_push(db: AsyncSession) -> dict:
     """L1 推送执行
 
     筛选 strength <= 阈值的记忆，按 strength 升序排列，
-    每个目标每天最多 3 条，工作日 09:00-19:00 推送。
+    每个目标每天最多 3 条，工作日 09:00-19:00 推送（配置时区）。
     """
     threshold = settings.push_l1_threshold
     daily_limit = settings.push_l1_daily_limit
     window_start = settings.push_window_start
     window_end = settings.push_window_end
 
-    # 检查推送时间窗口
-    now = datetime.utcnow()  # Note: 实际应为北京时间
-    hour = now.hour
+    # 检查推送时间窗口（配置时区）
+    now = ms_now()
+    hour = ms_to_hour(now)
     if not (window_start <= hour < window_end):
         return {"pushed": 0, "push_cards": [], "reason": "outside push window"}
 
@@ -36,7 +35,7 @@ async def run_l1_push(db: AsyncSession) -> dict:
     candidates = list(result.scalars().all())
 
     push_cards = []
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = ms_day_start(now)
 
     for memory in candidates:
         if len(push_cards) >= 20:  # 总量限制
@@ -57,8 +56,7 @@ async def run_l1_push(db: AsyncSession) -> dict:
             continue
 
         # 检查 24h 防抖
-        from datetime import timedelta
-        since_24h = now - timedelta(hours=24)
+        since_24h = now - MS_24H
         debounce_stmt = select(func.count()).select_from(PushLog).where(
             PushLog.memory_id == memory.id,
             PushLog.target_id == target_id,
@@ -103,9 +101,8 @@ async def find_l2_candidates(
     candidates = list(result.scalars().all())
 
     # 检查 24h 防抖
-    from datetime import timedelta
-    now = datetime.utcnow()
-    since_24h = now - timedelta(hours=24)
+    now = ms_now()
+    since_24h = now - MS_24H
     filtered = []
     for m in candidates:
         debounce_stmt = select(func.count()).select_from(PushLog).where(
@@ -120,7 +117,7 @@ async def find_l2_candidates(
                 "id": m.id,
                 "content": m.content,
                 "type": m.type,
-                "created_at": m.created_at.isoformat(),
+                "created_at": m.created_at,
             })
             # 写 push_log
             db.add(PushLog(memory_id=m.id, push_type="L2", target_id=chat_id))
@@ -134,5 +131,5 @@ def _build_l1_card(memory: Memory) -> dict:
     return {
         "type": memory.type,
         "content": memory.content,
-        "source": f"群聊 | {memory.created_at.strftime('%m月%d日')}",
+        "source": f"群聊 | {ms_to_strftime(memory.created_at, '%m月%d日')}",
     }

@@ -57,3 +57,44 @@ MEMORY_EXTRACTION_PROMPT = """以下是一段团队群聊记录，请提取其�
 }}
 
 如果没有值得记住的信息，返回 {{"memories": []}}"""
+
+# ─── JSON Schema（用于 Function Calling）───
+
+CONFLICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "候选记忆的索引"},
+                    "has_conflict": {"type": "boolean"},
+                    "type": {"type": "string", "enum": ["update", "cancel", "supplement", "none"]},
+                    "reason": {"type": "string", "description": "简要说明原因"},
+                },
+                "required": ["index", "has_conflict", "type"],
+            },
+        },
+    },
+    "required": ["items"],
+}
+
+MEMORY_EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "精简后的记忆内容"},
+                    "type": {"type": "string", "enum": ["decision", "fact", "intent", "command"]},
+                    "confidence": {"type": "number", "description": "0-1 置信度评分"},
+                },
+                "required": ["content", "type", "confidence"],
+            },
+        },
+    },
+    "required": ["memories"],
+}

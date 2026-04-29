@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from pydantic import BaseModel, Field
 
 
@@ -34,12 +32,12 @@ class MemoryResp(BaseModel):
     version: int
     parent_id: str | None = None
     superseded_by: str | None = None
-    last_reviewed_at: datetime | None = None
+    last_reviewed_at: int | None = None
     source_message_id: str | None = None
     source_chat_id: str | None = None
     confidence: float | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: int
+    updated_at: int
 
 
 class MemoryListResp(BaseModel):

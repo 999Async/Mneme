@@ -7,6 +7,7 @@ from app.db.session import get_db
 from app.schemas.common import ok
 from app.schemas.event import ConversationEndEvent, IncomingEvent
 from app.services import intent_service, extraction_service
+from app.utils.datetime import ms_to_strftime
 from app.services.conflict_service import detect_conflicts_with_llm
 from app.services.memory_service import create_memory, supersede_memory
 
@@ -116,7 +117,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         from app.services.memory_service import list_memories
         items, total = await list_memories(db, owner_id=owner_id, active_only=True, page_size=10)
         if items:
-            text = "\n".join(f"- [{m.type}] {m.content} ({m.created_at.strftime('%m/%d')})" for m in items)
+            text = "\n".join(f"- [{m.type}] {m.content} ({ms_to_strftime(m.created_at, '%m/%d')})" for m in items)
             return ok({
                 "action": "reply",
                 "reply_text": f"你的记忆 ({total} 条)：\n{text}",

@@ -22,9 +22,9 @@ async def get_memory_api(memory_id: str, db: AsyncSession = Depends(get_db)):
         "tags": memory.tags, "strength": memory.strength,
         "active": memory.active, "version": memory.version,
         "parent_id": memory.parent_id,
-        "last_reviewed_at": memory.last_reviewed_at.isoformat() if memory.last_reviewed_at else None,
-        "created_at": memory.created_at.isoformat(),
-        "updated_at": memory.updated_at.isoformat(),
+        "last_reviewed_at": memory.last_reviewed_at,
+        "created_at": memory.created_at,
+        "updated_at": memory.updated_at,
     })
 
 
@@ -40,12 +40,12 @@ async def get_memory_history_api(memory_id: str, db: AsyncSession = Depends(get_
         "current": {
             "id": current.id, "content": current.content,
             "version": current.version, "active": current.active,
-            "created_at": current.created_at.isoformat(),
+            "created_at": current.created_at,
         },
         "history": [{
             "id": h.id, "content": h.content,
             "version": h.version, "active": h.active,
-            "created_at": h.created_at.isoformat(),
+            "created_at": h.created_at,
         } for h in history],
     })
 
@@ -59,6 +59,6 @@ async def review_memory_api(memory_id: str, body: ReviewReq, db: AsyncSession = 
     return ok({
         "id": memory.id,
         "strength": memory.strength,
-        "last_reviewed_at": memory.last_reviewed_at.isoformat() if memory.last_reviewed_at else None,
+        "last_reviewed_at": memory.last_reviewed_at,
         "active": memory.active,
     })

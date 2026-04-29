@@ -1,10 +1,10 @@
-from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Index, String, JSON
+from sqlalchemy import BigInteger, Index, String, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.memory import Base, UuidStr
+from app.utils.datetime import ms_now
 
 
 class ContextSnapshot(Base):
@@ -14,8 +14,8 @@ class ContextSnapshot(Base):
     user_id: Mapped[str] = mapped_column(String(100), nullable=False)
     chat_id: Mapped[str] = mapped_column(String(100), nullable=False)
     snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=ms_now)
 
     __table_args__ = (
         Index("idx_snapshots_user", "user_id", created_at.desc()),

@@ -58,7 +58,7 @@ async def create_memory_api(body: CreateMemoryReq, db: AsyncSession = Depends(ge
         "active": memory.active,
         "version": memory.version,
         "parent_id": memory.parent_id,
-        "created_at": memory.created_at.isoformat(),
+        "created_at": memory.created_at,
         "conflict_detected": len(conflicts) > 0,
         "overwritten_id": overwritten_id,
     })

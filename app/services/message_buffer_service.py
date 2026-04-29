@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.cache import redis_client
 from app.config import settings
 from app.llm.client import chat_json
-from app.llm.prompts import MEMORY_EXTRACTION_PROMPT
+from app.llm.prompts import MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_SCHEMA
 from app.rules.entity_rules import desensitize, extract_entities, extract_keywords
 from app.services import extraction_service
 from app.services.conflict_service import detect_conflicts_with_llm
@@ -119,7 +119,7 @@ async def extract_from_buffer(
         {"role": "system", "content": "你是团队记忆提取助手，只返回 JSON。"},
         {"role": "user", "content": prompt},
     ]
-    llm_result = await chat_json(llm_messages, temperature=0.2, max_tokens=2000)
+    llm_result = await chat_json(llm_messages, temperature=0.2, max_tokens=2000, schema=MEMORY_EXTRACTION_SCHEMA)
 
     extracted_count = 0
     llm_available = True

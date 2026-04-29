@@ -1,5 +1,3 @@
-from datetime import datetime, timedelta
-
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +6,7 @@ from app.db.session import get_db
 from app.schemas.common import ok
 from app.schemas.push_log import CreatePushLogReq
 from app.models import PushLog
+from app.utils.datetime import ms_now, ms_day_start, MS_24H
 
 router = APIRouter()
 
@@ -34,7 +33,7 @@ async def check_push_status(
     db: AsyncSession = Depends(get_db),
 ):
     """检查推送防抖状态"""
-    since = datetime.utcnow() - timedelta(hours=24)
+    since = ms_now() - MS_24H
     stmt = select(func.count()).select_from(PushLog).where(
         PushLog.memory_id == memory_id,
         PushLog.target_id == target_id,
@@ -45,7 +44,7 @@ async def check_push_status(
 
     # L1: 检查今日总量
     if push_type == "L1":
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = ms_day_start(ms_now())
         daily_stmt = select(func.count()).select_from(PushLog).where(
             PushLog.target_id == target_id,
             PushLog.push_type == "L1",
