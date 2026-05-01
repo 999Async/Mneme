@@ -6,11 +6,12 @@ class IncomingEvent(BaseModel):
     session_key: str | None = None
     content: str
     is_mentioned: bool = False
+    message_id: str | None = None  # 飞书消息 ID，用于溯源
 
 
 class ConversationEndEvent(BaseModel):
     """Plugin agent_end POST body"""
-    messages: list[dict] = []
+    messages: list[dict] = []  # 每条 dict 可包含 message_id
     session_key: str | None = None
 
 

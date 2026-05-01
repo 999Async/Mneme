@@ -32,6 +32,7 @@ async def buffer_message(
     *,
     role: str = "user",
     session_key: str | None = None,
+    message_id: str | None = None,
 ) -> dict:
     """缓冲一条消息到 Redis List。
 
@@ -42,6 +43,7 @@ async def buffer_message(
         "content": content,
         "role": role,
         "session_key": session_key,
+        "message_id": message_id,
     }, ensure_ascii=False)
 
     ok = await redis_client.lpush(_buffer_key(owner_id), payload)
@@ -156,11 +158,21 @@ async def extract_from_buffer(
                 llm_available = False
                 llm_error = conflict_result.get("llm_error")
 
-            # 创建记忆
+            # 创建记忆（附带来源信息）
+            source_ids = [m.get("message_id") for m in messages if m.get("message_id")]
+            context_snapshot = {
+                "source_messages": [m.get("content", "")[:200] for m in messages[:5]],
+                "source_count": len(messages),
+                "source_message_ids": source_ids[:5],
+                "session_key": messages[0].get("session_key") if messages else None,
+            }
             memory = await create_memory(
                 db, scope="group", owner_id=owner_id, type=mem_type,
                 content=safe_content, tags=tags,
                 confidence=confidence,
+                context_snapshot=context_snapshot,
+                source_chat_id=owner_id,
+                source_message_id=source_ids[0] if source_ids else None,
             )
 
             # 处理冲突
@@ -195,7 +207,13 @@ async def extract_from_buffer(
                 db, scope="group", owner_id=owner_id, type=ext.type,
                 content=ext.content, tags=ext.tags,
                 confidence=ext.confidence,
-                context_snapshot=ext.context_snapshot,
+                context_snapshot={
+                    "raw_content": msg.get("content", "")[:200],
+                    "session_key": msg.get("session_key"),
+                    "message_id": msg.get("message_id"),
+                },
+                source_chat_id=owner_id,
+                source_message_id=msg.get("message_id"),
             )
 
             for conflict in conflicts:

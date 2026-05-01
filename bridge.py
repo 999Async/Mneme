@@ -43,11 +43,13 @@ CRON_EXTRACT_INTERVAL = int(os.environ.get("CRON_EXTRACT_INTERVAL", "300"))   # 
 TEST_MODE = os.environ.get("MNEME_TEST_MODE", "false").lower() == "true"
 TEST_CHAT_IDS = [c.strip() for c in os.environ.get("MNEME_TEST_CHAT_IDS", "").split(",") if c.strip()]
 TEST_POLL_INTERVAL = int(os.environ.get("MNEME_TEST_POLL_INTERVAL", "10"))
+# Mneme 自己的 app_id，用于过滤自己的回复避免循环（从 lark-cli config 读取）
+_MNEME_APP_ID = ""
 
 
 # ── 飞书操作 ──────────────────────────────────────────────────────────
 async def send_reply(chat_id: str, text: str) -> bool:
-    """通过 lark-cli 发送文本回复"""
+    """通过 lark-cli 发送文本回复（独立消息，无引用，回退用）"""
     try:
         proc = await asyncio.create_subprocess_exec(
             "lark-cli", "im", "+messages-send",
@@ -67,8 +69,56 @@ async def send_reply(chat_id: str, text: str) -> bool:
         return False
 
 
+async def send_reply_message(message_id: str, text: str) -> bool:
+    """通过飞书回复 API 以引用形式回复文本消息"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "lark-cli", "api", "POST",
+            f"/open-apis/im/v1/messages/{message_id}/reply",
+            "--data", json.dumps({
+                "msg_type": "text",
+                "content": json.dumps({"text": text}),
+            }),
+            "--as", "bot",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode != 0:
+            log.error("飞书回复 API 失败 (rc=%d): %s", proc.returncode, stderr.decode().strip())
+            return False
+        return True
+    except Exception as e:
+        log.error("飞书回复 API 异常: %s", e)
+        return False
+
+
+async def send_card_reply(message_id: str, card_json: dict) -> bool:
+    """通过飞书回复 API 以引用形式回复卡片消息"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "lark-cli", "api", "POST",
+            f"/open-apis/im/v1/messages/{message_id}/reply",
+            "--data", json.dumps({
+                "msg_type": "interactive",
+                "content": json.dumps(card_json),
+            }),
+            "--as", "bot",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode != 0:
+            log.error("飞书卡片回复 API 失败 (rc=%d): %s", proc.returncode, stderr.decode().strip())
+            return False
+        return True
+    except Exception as e:
+        log.error("飞书卡片回复 API 异常: %s", e)
+        return False
+
+
 async def send_card(chat_id: str, card_json: dict) -> bool:
-    """通过 lark-cli 发送交互卡片"""
+    """通过 lark-cli 发送交互卡片（独立消息，主动推送用）"""
     try:
         proc = await asyncio.create_subprocess_exec(
             "lark-cli", "api", "POST",
@@ -141,12 +191,19 @@ def build_reply_card(title: str, body_text: str, template: str = "blue") -> dict
 
 
 # ── Mneme API 客户端 ──────────────────────────────────────────────────
-async def forward_to_mneme(client: httpx.AsyncClient, session_key: str, content: str, is_mentioned: bool) -> dict | None:
+async def forward_to_mneme(client: httpx.AsyncClient, session_key: str, content: str, is_mentioned: bool, message_id: str = "") -> dict | None:
     """POST 到 Mneme /api/events/message"""
+    payload = {
+        "session_key": session_key,
+        "content": content,
+        "is_mentioned": is_mentioned,
+    }
+    if message_id:
+        payload["message_id"] = message_id
     try:
         resp = await client.post(
             f"{MNEME_URL}/api/events/message",
-            json={"session_key": session_key, "content": content, "is_mentioned": is_mentioned},
+            json=payload,
             timeout=30.0,
         )
         resp.raise_for_status()
@@ -233,7 +290,7 @@ async def process_event(client: httpx.AsyncClient, event: dict):
 
     log.info("收到消息 [%s] %s (mention=%s): %s", chat_type, chat_id, is_mentioned, content[:80])
 
-    result = await forward_to_mneme(client, session_key, content, is_mentioned)
+    result = await forward_to_mneme(client, session_key, content, is_mentioned, message_id)
     if not result or not result.get("ok"):
         log.warning("Mneme 返回异常: %s", result)
         return
@@ -253,14 +310,19 @@ async def process_event(client: httpx.AsyncClient, event: dict):
         reply_text = data.get("reply_text", "")
         if not reply_text:
             return
-        # 长文本用卡片，短文本用纯文本
-        if len(reply_text) > 50:
-            log.info("卡片回复 [%s]", chat_id)
-            card = build_reply_card("Mneme", reply_text, "blue")
-            await send_card(chat_id, card)
+        card = build_reply_card("Mneme", reply_text, "blue")
+        if message_id:
+            # 有 message_id 时用飞书回复 API（引用形式）
+            log.info("引用卡片回复 [%s] → msg %s", chat_id, message_id)
+            ok = await send_card_reply(message_id, card)
+            if not ok:
+                # 回复 API 失败，回退到独立消息
+                log.warning("回复 API 失败，回退独立卡片 [%s]", chat_id)
+                await send_card(chat_id, card)
         else:
-            log.info("文本回复 [%s]: %s", chat_id, reply_text[:60])
-            await send_reply(chat_id, reply_text)
+            # 无 message_id（如测试模式），用独立卡片
+            log.info("独立卡片回复 [%s]", chat_id)
+            await send_card(chat_id, card)
 
     elif action == "push":
         log.info("推送 [%s]", chat_id)
@@ -349,9 +411,10 @@ async def poll_chat_messages(client: httpx.AsyncClient, chat_id: str):
                 continue
             _seen_message_ids.add(msg_id)
 
-            # 跳过自己发的消息和被撤回的消息
+            # 跳过 Mneme 自己发的消息（避免循环）和被撤回的消息
             sender = msg.get("sender", {})
-            if sender.get("sender_type") == "app":
+            sender_id = sender.get("id", "")
+            if sender.get("sender_type") == "app" and _MNEME_APP_ID and sender_id == _MNEME_APP_ID:
                 continue
             if msg.get("deleted", False):
                 continue
@@ -448,6 +511,21 @@ async def main():
     token = os.environ.get("MNEME_SERVICE_TOKEN", "")
     if not token:
         log.warning("MNEME_SERVICE_TOKEN 未设置，Mneme API 认证可能失败")
+
+    # 读取 Mneme 自己的 app_id（用于测试模式过滤自己的消息）
+    global _MNEME_APP_ID
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "lark-cli", "auth", "status", "--format", "json",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode == 0:
+            auth_data = json.loads(stdout.decode())
+            _MNEME_APP_ID = auth_data.get("appId", "")
+            log.info("Mneme app_id: %s", _MNEME_APP_ID)
+    except Exception:
+        pass
 
     async with httpx.AsyncClient(
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},

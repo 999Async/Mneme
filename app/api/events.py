@@ -37,11 +37,18 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         conflicts = result["conflicts"]
 
         # 创建新记忆
+        context_snapshot = {
+            "raw_content": body.content,
+            "session_key": body.session_key,
+            "message_id": body.message_id,
+        }
         memory = await create_memory(
             db, scope=scope, owner_id=owner_id, type=extracted.type,
             content=extracted.content, tags=extracted.tags,
             confidence=extracted.confidence,
-            context_snapshot=extracted.context_snapshot,
+            context_snapshot=context_snapshot,
+            source_chat_id=owner_id,  # owner_id 即 session_key 解析出的 chat_id
+            source_message_id=body.message_id,
         )
 
         # 如果有冲突，覆写旧记忆
@@ -136,7 +143,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
     if intent == intent_service.Intent.AUTO_EXTRACT:
         owner_id = _parse_owner_id(body.session_key)
         from app.services.message_buffer_service import buffer_message, check_count_trigger, extract_from_buffer
-        result = await buffer_message(owner_id, body.content, role="user", session_key=body.session_key)
+        result = await buffer_message(owner_id, body.content, role="user", session_key=body.session_key, message_id=body.message_id)
 
         if not result["buffered"]:
             return ok({"action": "none", "reply_text": None, "relevant_memories": []})
