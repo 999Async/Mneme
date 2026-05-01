@@ -18,5 +18,6 @@ class EventResponse(BaseModel):
     """Python 返回给 Plugin 的格式"""
     reply_text: str | None = None
     relevant_memories: list[dict] = []
-    action: str = "none"  # reply / push / none
+    action: str = "none"  # reply / react / push / none
+    reaction_emoji: str = "THUMBSUP"  # 飞书内置表情类型（react action 时使用）
     push_card: dict | None = None

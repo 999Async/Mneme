@@ -61,9 +61,13 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         if not result.get("llm_available", True):
             conflict_info += "（⚠️ AI 服务暂时不可用，冲突检测可能不够准确）"
 
+        # 选择表情：有冲突更新用 THUMBSUP，普通存储用 DONE
+        emoji = "THUMBSUP" if conflicts else "DONE"
+
         return ok({
-            "action": "reply",
-            "reply_text": f"已记住：{extracted.content} [{scope}]{conflict_info}",
+            "action": "react",
+            "reaction_emoji": emoji,
+            "reply_text": None,
             "relevant_memories": [],
             "push_card": None,
         })

@@ -87,15 +87,17 @@ async def run_l1_push(db: AsyncSession) -> dict:
 
     await db.commit()
 
-    # 实际发送 L1 推送
+    # 实际发送 L1 推送（交互卡片）
     if push_cards:
         from app.services.feishu_push_service import feishu_push
         for card in push_cards:
-            card_content = card["content"]
-            text = f"📌 你可能快忘了：{card_content['content']}\n来源：{card_content['source']}"
-            success = await feishu_push.send_text(card["target_id"], text)
+            success = await feishu_push.send_card(card["target_id"], card["content"])
             if not success:
-                logger.warning("L1 push 发送失败 target=%s", card["target_id"])
+                logger.warning("L1 push 卡片发送失败 target=%s，降级为文本", card["target_id"])
+                # 降级为纯文本
+                card_content = card["content"]
+                text = f"📌 你可能快忘了：{_extract_card_text(card_content)}"
+                await feishu_push.send_text(card["target_id"], text)
 
     return {"pushed": len(push_cards), "push_cards": push_cards}
 
@@ -140,9 +142,37 @@ async def find_l2_candidates(
 
 
 def _build_l1_card(memory: Memory) -> dict:
-    """构建 L1 飞书卡片 JSON"""
+    """构建 L1 飞书卡片 JSON 2.0"""
     return {
-        "type": memory.type,
-        "content": memory.content,
-        "source": f"群聊 | {ms_to_strftime(memory.created_at, '%m月%d日')}",
+        "schema": "2.0",
+        "config": {"width_mode": "fill"},
+        "header": {
+            "title": {"tag": "plain_text", "content": "📌 记忆提醒"},
+            "template": "orange",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**{memory.content}**",
+                },
+                {
+                    "tag": "markdown",
+                    "content": f"<text_tag color='grey'>来源：群聊 | {ms_to_strftime(memory.created_at, '%m月%d日')}</text_tag>",
+                },
+            ],
+        },
     }
+
+
+def _extract_card_text(card: dict) -> str:
+    """从卡片 JSON 中提取记忆文本（降级用）"""
+    try:
+        elements = card.get("body", {}).get("elements", [])
+        for el in elements:
+            content = el.get("content", "")
+            if content and not content.startswith("<text_tag"):
+                return content.strip("*")
+    except Exception:
+        pass
+    return ""
