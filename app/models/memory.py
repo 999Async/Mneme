@@ -48,8 +48,13 @@ class Memory(Base):
     )
 
     __table_args__ = (
-        Index("idx_memories_owner_scope", "owner_id", "scope"),
-        Index("idx_memories_active", "owner_id"),
-        Index("idx_memories_strength", "strength"),
+        # Composite: covers search/conflict/list WHERE owner_id=X AND scope=X AND active=True
+        # PostgreSQL uses leftmost prefix: (owner_id), (owner_id, scope) also benefit
+        Index("idx_memories_owner_scope_active", "owner_id", "scope", "active"),
+        # Decay batch: WHERE active=True ORDER BY updated_at ASC
+        Index("idx_memories_active_updated", "active", "updated_at"),
+        # Push candidates: WHERE active=True AND strength <= X ORDER BY strength ASC
+        Index("idx_memories_active_strength", "active", "strength"),
+        # Version chain traversal
         Index("idx_memories_parent", "parent_id"),
     )

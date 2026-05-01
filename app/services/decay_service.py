@@ -23,17 +23,28 @@ async def run_decay(db: AsyncSession, batch_size: int = 100) -> dict:
 
     公式：strength(t) = e^(-rate × sensitivity × t_days)
     rate 按 memory.type 分层，未知类型 fallback 到 base_rate
+    跳过 strength=0 和近期更新的记忆
     """
     base_rate = settings.decay_base_rate
     sensitivity = settings.decay_sensitivity
     threshold = settings.push_l1_threshold
 
-    # 查询所有活跃记忆
-    query = select(Memory).where(Memory.active == True).order_by(Memory.updated_at.asc())
+    now = ms_now()
+    # 只处理1小时前更新的、strength > 0 的记忆
+    cutoff = now - (MS_24H // 24)
+
+    query = (
+        select(Memory)
+        .where(
+            Memory.active == True,
+            Memory.strength > 0,
+            Memory.updated_at < cutoff,
+        )
+        .order_by(Memory.updated_at.asc())
+    )
     result = await db.execute(query.limit(batch_size))
     memories = list(result.scalars().all())
 
-    now = ms_now()
     scanned = 0
     decayed = 0
     push_candidates = 0
@@ -49,6 +60,7 @@ async def run_decay(db: AsyncSession, batch_size: int = 100) -> dict:
 
         if abs(new_strength - memory.strength) > 0.001:
             decayed += 1
+            old_strength = memory.strength
             memory.strength = new_strength
             memory.updated_at = now
 
@@ -60,7 +72,7 @@ async def run_decay(db: AsyncSession, batch_size: int = 100) -> dict:
                 memory_id=memory.id,
                 action="decay",
                 detail={
-                    "strength_before": round(memory.strength, 4),
+                    "strength_before": round(old_strength, 4),
                     "strength_after": new_strength,
                     "interval_days": round(days_since, 2),
                     "decay_rate": rate,
