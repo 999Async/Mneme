@@ -41,6 +41,7 @@ class Memory(Base):
     source_message_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_chat_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rep_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # 重复提及次数
     embedding = mapped_column(Vector(1536), nullable=True)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=ms_now)
     updated_at: Mapped[int] = mapped_column(

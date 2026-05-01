@@ -55,7 +55,12 @@ async def run_decay(db: AsyncSession, batch_size: int = 100) -> dict:
         days_since = (now - ref_ms) / MS_24H
 
         rate = TYPE_DECAY_RATES.get(memory.type, base_rate)
-        new_strength = math.exp(-rate * sensitivity * days_since)
+
+        # 重复增强：每多提及一次，衰减率降低 15%（最低降到原速率的 25%）
+        rep_factor = max(0.25, 0.85 ** (memory.rep_count - 1))
+        effective_rate = rate * rep_factor
+
+        new_strength = math.exp(-effective_rate * sensitivity * days_since)
         new_strength = round(max(new_strength, 0.0), 4)
 
         if abs(new_strength - memory.strength) > 0.001:

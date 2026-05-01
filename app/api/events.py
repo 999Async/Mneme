@@ -10,6 +10,7 @@ from app.services import intent_service, extraction_service
 from app.utils.datetime import ms_to_strftime
 from app.services.conflict_service import detect_conflicts_with_llm
 from app.services.memory_service import create_memory, supersede_memory
+from app.services.context_service import save_snapshot
 
 router = APIRouter()
 
@@ -20,7 +21,16 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
     返回格式：{ok, data: {action, reply_text, relevant_memories, push_card}}
     """
-    intent, params = intent_service.identify(body.content, body.is_mentioned)
+    # 幂等去重：同一 event_id 5 分钟内不重复处理
+    if body.event_id:
+        from app.cache import redis_client
+        dedupe_key = f"event:{body.event_id}"
+        seen = await redis_client.get(dedupe_key)
+        if seen:
+            return ok({"action": "none", "reply_text": None, "relevant_memories": []})
+        await redis_client.set(dedupe_key, "1", ttl_seconds=300)
+
+    intent, params = await intent_service.identify_with_llm_fallback(body.content, body.is_mentioned)
 
     # --- STORE ---
     if intent == intent_service.Intent.STORE:
@@ -51,6 +61,15 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             source_message_id=body.message_id,
         )
 
+        # 保存上下文快照（best-effort，用于心流恢复）
+        try:
+            await save_snapshot(
+                db, user_id=owner_id, chat_id=owner_id,
+                snapshot={"last_content": extracted.content, "session_key": body.session_key},
+            )
+        except Exception:
+            pass
+
         # 如果有冲突，覆写旧记忆
         for conflict in conflicts:
             from app.services.memory_service import get_memory
@@ -77,6 +96,48 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             "reply_text": None,
             "relevant_memories": [],
             "push_card": None,
+        })
+
+    # --- OVERWRITE ---
+    if intent == intent_service.Intent.OVERWRITE:
+        scope = params.get("scope", "personal")
+        extracted = extraction_service.extract_from_command(body.content, scope)
+        owner_id = _parse_owner_id(body.session_key)
+
+        # 搜索旧记忆
+        from app.services.search_service import search_memories
+        import re
+        clean = re.sub(r"@\S+\s*", "", body.content)
+        for kw in ["覆盖", "改一下", "更新记忆", "删除记忆", "忘掉"]:
+            clean = clean.replace(kw, "")
+        clean = clean.strip()
+        old_memories = await search_memories(db, query=clean, owner_id=owner_id, limit=3) if clean else []
+
+        if not old_memories:
+            return ok({
+                "action": "reply",
+                "reply_text": "未找到可覆盖的记忆。请先告诉我具体要更新哪条记忆。",
+                "relevant_memories": [],
+            })
+
+        # 覆写第一条匹配的记忆
+        old = old_memories[0]
+        new_memory = await create_memory(
+            db, scope=scope, owner_id=owner_id, type=extracted.type or old.type,
+            content=extracted.content, tags=extracted.tags,
+            confidence=extracted.confidence,
+            context_snapshot={"raw_content": body.content, "session_key": body.session_key},
+            source_chat_id=owner_id,
+            source_message_id=body.message_id,
+            parent_id=old.id,
+        )
+        await supersede_memory(db, old, new_memory.id)
+
+        return ok({
+            "action": "react",
+            "reaction_emoji": "THUMBSUP",
+            "reply_text": f"已更新记忆（v{old.version} → v{old.version + 1}）",
+            "relevant_memories": [],
         })
 
     # --- QUERY ---
@@ -144,6 +205,17 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         owner_id = _parse_owner_id(body.session_key)
         from app.services.message_buffer_service import buffer_message, check_count_trigger, extract_from_buffer
         result = await buffer_message(owner_id, body.content, role="user", session_key=body.session_key, message_id=body.message_id)
+
+        # 保存上下文快照（best-effort，不阻塞主流程）
+        if result.get("buffered") and len(body.content) >= 5:
+            try:
+                await save_snapshot(
+                    db, user_id=owner_id, chat_id=owner_id,
+                    snapshot={"last_content": body.content, "session_key": body.session_key},
+                )
+                await db.commit()
+            except Exception:
+                pass  # 快照写入失败不影响消息处理
 
         if not result["buffered"]:
             return ok({"action": "none", "reply_text": None, "relevant_memories": []})

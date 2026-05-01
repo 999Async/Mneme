@@ -105,15 +105,47 @@ async def run_l1_push(db: AsyncSession) -> dict:
 async def find_l2_candidates(
     db: AsyncSession, *, message: str, chat_id: str, threshold: float = 0.75
 ) -> list[dict]:
-    """查找 L2 候选记忆（对话语义相似度触发）"""
-    # Demo 简化：用子串匹配模拟语义相似度
-    stmt = select(Memory).where(
-        Memory.active == True,
-        Memory.source_chat_id == chat_id,
-        Memory.content.ilike(f"%{message[:20]}%"),
-    ).limit(3)
-    result = await db.execute(stmt)
-    candidates = list(result.scalars().all())
+    """查找 L2 候选记忆（语义相似度触发）
+
+    优先用 Embedding 余弦相似度，降级到关键词匹配。
+    """
+    candidates: list[Memory] = []
+
+    # 路径1：Embedding 语义搜索
+    try:
+        from app.llm.embedding import encode
+        query_vec = await encode(message)
+        if query_vec:
+            # pgvector 余弦相似度搜索
+            vec_stmt = (
+                select(Memory, Memory.embedding.cosine_distance(query_vec).label("distance"))
+                .where(
+                    Memory.active == True,
+                    Memory.source_chat_id == chat_id,
+                    Memory.embedding != None,
+                )
+                .order_by("distance")
+                .limit(10)
+            )
+            vec_result = await db.execute(vec_stmt)
+            for row in vec_result:
+                m = row[0]
+                # cosine_distance: 0=完全相同, 2=完全相反; similarity = 1 - distance/2
+                similarity = 1 - row.distance / 2
+                if similarity >= threshold:
+                    candidates.append(m)
+    except Exception as e:
+        logger.warning("L2 embedding search failed, fallback to keyword: %s", e)
+
+    # 路径2：降级到关键词匹配
+    if not candidates:
+        stmt = select(Memory).where(
+            Memory.active == True,
+            Memory.source_chat_id == chat_id,
+            Memory.content.ilike(f"%{message[:20]}%"),
+        ).limit(3)
+        result = await db.execute(stmt)
+        candidates = list(result.scalars().all())
 
     # 检查 24h 防抖
     now = ms_now()

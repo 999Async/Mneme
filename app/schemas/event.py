@@ -7,6 +7,7 @@ class IncomingEvent(BaseModel):
     content: str
     is_mentioned: bool = False
     message_id: str | None = None  # 飞书消息 ID，用于溯源
+    event_id: str | None = None    # 飞书事件 ID，用于幂等去重
 
 
 class ConversationEndEvent(BaseModel):

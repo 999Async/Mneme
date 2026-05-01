@@ -121,10 +121,15 @@ async def get_history(db: AsyncSession, memory_id: str) -> list[Memory]:
 
 
 async def supersede_memory(db: AsyncSession, old_memory: Memory, new_memory_id: str) -> None:
-    """将旧记忆标记为被覆写"""
+    """将旧记忆标记为被覆写，新记忆继承重复计数+1"""
     old_memory.active = False
     old_memory.superseded_by = new_memory_id
     old_memory.updated_at = ms_now()
+
+    # 新记忆继承重复计数并递增
+    new_memory = await db.get(Memory, new_memory_id)
+    if new_memory:
+        new_memory.rep_count = old_memory.rep_count + 1
 
     log = MemoryLog(
         memory_id=old_memory.id,
@@ -168,6 +173,7 @@ async def review_memory(
     if action == "review":
         memory.strength = 1.0
         memory.last_reviewed_at = now
+        memory.rep_count += 1  # 复习增强重复计数
         log_action = "review"
         log_detail = {"action": "review", "user_id": user_id}
     elif action == "dismiss":
