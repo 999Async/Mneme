@@ -1,6 +1,7 @@
 .claude
 .trellis
 AGENTS.md
+CLAUDE.md
 *.db
 *.json
 docs/*.md
