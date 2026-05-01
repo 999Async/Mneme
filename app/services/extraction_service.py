@@ -1,5 +1,7 @@
 """记忆抽取服务：从消息中提取记忆 + entity + tags"""
 
+import re
+
 from app.rules.entity_rules import desensitize, extract_entities, extract_keywords
 from app.rules.extraction_rules import match_extraction_rules
 
@@ -71,13 +73,18 @@ def extract(content: str, context_messages: list[str] | None = None) -> Extracte
     )
 
 
+def _strip_mentions(text: str) -> str:
+    """移除 @xxx 提及（飞书 @Mneme / @Meneme / @用户名 等）"""
+    return re.sub(r"@\S+\s*", "", text).strip()
+
+
 def extract_from_command(content: str, scope: str) -> ExtractedMemory:
     """从显式指令中提取记忆（记住/大家记住）
 
     显式存储的置信度固定 1.0
     """
-    # 移除指令关键词
-    clean = content
+    # 先移除 @提及，再移除指令关键词
+    clean = _strip_mentions(content)
     for prefix in ["大家记住", "大家记一下", "记住", "记一下", "帮我记", "记下来"]:
         if clean.startswith(prefix):
             clean = clean[len(prefix):].strip()

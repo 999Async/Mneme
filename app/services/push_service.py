@@ -1,7 +1,11 @@
 """L1/L2 推送候选筛选 + 防抖 + 日上限"""
 
+import logging
+
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app.models import Memory, PushLog
@@ -83,7 +87,16 @@ async def run_l1_push(db: AsyncSession) -> dict:
 
     await db.commit()
 
-    # TODO: 调 feishu_push_service 发送卡片
+    # 实际发送 L1 推送
+    if push_cards:
+        from app.services.feishu_push_service import feishu_push
+        for card in push_cards:
+            card_content = card["content"]
+            text = f"📌 你可能快忘了：{card_content['content']}\n来源：{card_content['source']}"
+            success = await feishu_push.send_text(card["target_id"], text)
+            if not success:
+                logger.warning("L1 push 发送失败 target=%s", card["target_id"])
+
     return {"pushed": len(push_cards), "push_cards": push_cards}
 
 

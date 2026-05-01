@@ -1,5 +1,6 @@
 """意图识别关键词库 — PRD 4.5.3"""
 
+import re
 from enum import Enum
 
 
@@ -36,10 +37,8 @@ def identify_intent(content: str, is_mentioned: bool) -> tuple[Intent, dict]:
         return Intent.AUTO_EXTRACT, {}
 
     text = content.lower()
-    # 移除 @Mneme / @mneme 部分
-    for mention in ["@mneme", "@mneme"]:
-        text = text.replace(mention, "")
-    text = text.strip()
+    # 移除 @xxx 提及（兼容各种写法：@Mneme / @Meneme / @用户名）
+    text = re.sub(r"@\S+\s*", "", text).strip()
 
     if not text:
         return Intent.PASS, {}

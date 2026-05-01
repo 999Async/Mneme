@@ -71,10 +71,9 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
     # --- QUERY ---
     if intent == intent_service.Intent.QUERY:
         owner_id = _parse_owner_id(body.session_key)
-        # 清理搜索词：去掉 @Mneme + 指令关键词
-        clean = body.content
-        for mention in ["@Mneme", "@mneme"]:
-            clean = clean.replace(mention, "")
+        # 清理搜索词：去掉 @提及 + 指令关键词
+        import re
+        clean = re.sub(r"@\S+\s*", "", body.content)
         for kw in ["查询", "搜索", "搜一下", "查一下", "有没有"]:
             clean = clean.replace(kw, "")
         clean = clean.strip()
