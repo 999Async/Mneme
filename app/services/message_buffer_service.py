@@ -12,7 +12,7 @@ from app.llm.client import chat_json
 from app.llm.prompts import MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_SCHEMA
 from app.rules.entity_rules import desensitize, extract_entities, extract_keywords
 from app.services import extraction_service
-from app.services.conflict_service import detect_conflicts_with_llm
+from app.services.conflict_service import detect_conflicts_with_llm, detect_duplicates
 from app.services.memory_service import create_memory, get_memory, supersede_memory
 
 logger = logging.getLogger(__name__)
@@ -148,12 +148,24 @@ async def extract_from_buffer(
             tags = {"keywords": keywords, "entities": entities}
             safe_content = desensitize(content)
 
+            # 去重检测（优先于冲突检测）
+            dupes = await detect_duplicates(
+                db, content=safe_content, owner_id=owner_id, scope="group",
+            )
+            if dupes:
+                continue  # 跳过重复记忆
+
             # 冲突检测
             conflict_result = await detect_conflicts_with_llm(
                 db, content=safe_content, tags=tags,
                 owner_id=owner_id, scope="group",
             )
             conflicts = conflict_result["conflicts"]
+            llm_duplicates = conflict_result.get("duplicates", [])
+
+            # LLM 判定的重复
+            if llm_duplicates:
+                continue  # 跳过重复记忆
             if not conflict_result.get("llm_available", True):
                 llm_available = False
                 llm_error = conflict_result.get("llm_error")
@@ -194,11 +206,22 @@ async def extract_from_buffer(
             if not ext:
                 continue
 
+            # 去重检测
+            dupes = await detect_duplicates(
+                db, content=ext.content, owner_id=owner_id, scope="group",
+            )
+            if dupes:
+                continue
+
             conflict_result = await detect_conflicts_with_llm(
                 db, content=ext.content, tags=ext.tags,
                 owner_id=owner_id, scope="group",
             )
             conflicts = conflict_result["conflicts"]
+            llm_duplicates = conflict_result.get("duplicates", [])
+
+            if llm_duplicates:
+                continue
             if not conflict_result.get("llm_available", True):
                 llm_available = False
                 llm_error = conflict_result.get("llm_error")
