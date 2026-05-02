@@ -42,14 +42,18 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         # 解析 owner_id from session_key (格式: "feishu:chat:oc_xxx" or "feishu:p2p:ou_xxx")
         owner_id = _parse_owner_id(body.session_key)
 
-        # 冲突检测（LLM 增强）
+        # 预计算 embedding（冲突检测和存储都需要，避免重复 API 调用）
+        from app.llm.embedding import encode
+        pre_embedding = await encode(extracted.content)
+
+        # 冲突检测（embedding 优先，降级到三路评分）
         result = await detect_conflicts_with_llm(
             db, content=extracted.content, tags=extracted.tags,
             owner_id=owner_id, scope=scope,
         )
         conflicts = result["conflicts"]
 
-        # 创建新记忆
+        # 创建新记忆（复用预计算的 embedding）
         context_snapshot = {
             "raw_content": body.content,
             "session_key": body.session_key,
@@ -60,8 +64,9 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             content=extracted.content, tags=extracted.tags,
             confidence=extracted.confidence,
             context_snapshot=context_snapshot,
-            source_chat_id=owner_id,  # owner_id 即 session_key 解析出的 chat_id
+            source_chat_id=owner_id,
             source_message_id=body.message_id,
+            embedding=pre_embedding,
         )
 
         # 保存上下文快照（best-effort，用于心流恢复）
@@ -299,14 +304,22 @@ async def _sync_base_background(chat_id: str, memory, conflict_ids: list[str]):
 
         async with async_session() as db:
             # 同步新记忆
-            await feishu_base_service.upsert_record(memory)
+            ok = await feishu_base_service.upsert_record(memory)
+            # upsert 失败时清除脏缓存并重试一次
+            if not ok:
+                import logging
+                logging.getLogger(__name__).warning("upsert 首次失败，清除缓存重试")
+                await feishu_base_service.invalidate_cache(chat_id)
+                base_config = await feishu_base_service.ensure_base(chat_id)
+                if base_config:
+                    ok = await feishu_base_service.upsert_record(memory)
             # 同步被覆写的旧记忆
             for cid in conflict_ids:
                 old_mem = await _get_mem(db, cid)
                 if old_mem:
                     await feishu_base_service.upsert_record(old_mem)
             # 首次创建时通过 bridge 发通知
-            if base_config.get("url"):
+            if base_config and base_config.get("is_new") and base_config.get("url"):
                 from app.services.feishu_push_service import feishu_push
                 await feishu_push.send_text(chat_id, f"📊 记忆管理面板已创建：{base_config['url']}")
     except Exception as e:

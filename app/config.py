@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     # Feishu Base (多维表格同步)
     feishu_base_enabled: bool = True
+    feishu_base_folder_token: str = ""  # 共享文件夹 token（空则用 bot 默认空间）
 
     # Feishu card callback
     feishu_callback_token: str = ""
