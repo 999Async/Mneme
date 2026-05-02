@@ -491,6 +491,7 @@ async def upsert_record(memory: Any) -> bool:
             "base", "+record-search",
             "--base-token", app_token,
             "--table-id", table_id,
+            "--format", "json",  # 确保返回 JSON 格式
             "--json", json.dumps({
                 "keyword": str(memory.id),
                 "search_fields": [primary_name],
@@ -498,7 +499,7 @@ async def upsert_record(memory: Any) -> bool:
             }, ensure_ascii=False),
             "--as", "bot",
         )
-        if search_result:
+        if search_result and search_result.get("ok"):
             items = search_result.get("data", {}).get("items", [])
             if items and len(items) > 0:
                 # 找到现有记录，使用其 record_id
