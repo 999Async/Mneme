@@ -279,7 +279,7 @@ async def detect_conflicts_with_llm(
     3. 对低置信候选用 LLM 验证
 
     Returns:
-        {"conflicts": [...], "llm_available": bool, "llm_error": str | None}
+        {"conflicts": [...], "duplicates": [...], "llm_available": bool, "llm_error": str | None}
     """
     # 路径 1：embedding 相似度初筛
     try:
@@ -297,12 +297,16 @@ async def detect_conflicts_with_llm(
         if low:
             llm_result = await llm_verify_conflict(content, low)
             verified = llm_result["conflicts"]
+            duplicates = llm_result["duplicates"]
             for c in verified:
+                c.pop("needs_llm_verify", None)
+            for c in duplicates:
                 c.pop("needs_llm_verify", None)
             llm_available = llm_result["llm_available"]
             llm_error = llm_result["llm_error"]
         else:
             verified = []
+            duplicates = []
             llm_available = True
             llm_error = None
 
@@ -311,7 +315,13 @@ async def detect_conflicts_with_llm(
 
         merged = high + verified
         merged.sort(key=lambda x: x["similarity_score"], reverse=True)
-        return {"conflicts": merged, "llm_available": llm_available, "llm_error": llm_error}
+
+        return {
+            "conflicts": merged,
+            "duplicates": duplicates,
+            "llm_available": llm_available,
+            "llm_error": llm_error,
+        }
 
     # 路径 2：降级到三路评分（原有逻辑）
     logger.info("embedding 无冲突候选，使用三路评分降级")
@@ -329,10 +339,17 @@ async def detect_conflicts_with_llm(
         c.pop("needs_llm_verify", None)
 
     if not need_verify:
-        return {"conflicts": high_confidence, "llm_available": True, "llm_error": None}
+        return {
+            "conflicts": high_confidence,
+            "duplicates": [],
+            "llm_available": True,
+            "llm_error": None,
+        }
 
     llm_result = await llm_verify_conflict(content, need_verify)
     for c in llm_result["conflicts"]:
+        c.pop("needs_llm_verify", None)
+    for c in llm_result["duplicates"]:
         c.pop("needs_llm_verify", None)
 
     merged = high_confidence + llm_result["conflicts"]
@@ -340,6 +357,7 @@ async def detect_conflicts_with_llm(
 
     return {
         "conflicts": merged,
+        "duplicates": llm_result["duplicates"],
         "llm_available": llm_result["llm_available"],
         "llm_error": llm_result["llm_error"],
     }
