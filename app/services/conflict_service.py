@@ -191,14 +191,18 @@ async def llm_verify_conflict(
 
     Args:
         content: 新记忆内容
-        candidates: 需要验证的候选列表（needs_llm_verify=True 的）
+        candidates: 需要验证的候选列表
 
     Returns:
-        {"conflicts": [...], "llm_available": bool, "llm_error": str | None}
-        conflicts 中每条包含原始字段 + LLM 判定的 type/reason
+        {
+            "conflicts": [...],  # 需要 supersede 的（update）
+            "duplicates": [...], # 需要跳过的重复（duplicate）
+            "llm_available": bool,
+            "llm_error": str | None
+        }
     """
     if not candidates:
-        return {"conflicts": [], "llm_available": True, "llm_error": None}
+        return {"conflicts": [], "duplicates": [], "llm_available": True, "llm_error": None}
 
     # 格式化已有记忆文本
     memories_text = "\n".join(
@@ -218,27 +222,44 @@ async def llm_verify_conflict(
 
     if not result["ok"]:
         logger.warning("LLM conflict verify failed: %s", result.get("error"))
-        # 降级：规则初筛结果全部保留
         return {
             "conflicts": candidates,
+            "duplicates": [],
             "llm_available": False,
             "llm_error": result.get("error", "unknown"),
         }
 
     # 解析 LLM 结果
     llm_conflicts = result["data"].get("items", result["data"].get("conflicts", []))
-    verified = []
+    verified_conflicts = []
+    verified_duplicates = []
+
     for item in llm_conflicts:
         idx = item.get("index", -1)
         if idx < 0 or idx >= len(candidates):
             continue
-        if item.get("has_conflict") and item.get("type") != "supplement":
-            candidate = candidates[idx]
-            candidate["conflict_type"] = item.get("type", "update")
-            candidate["llm_reason"] = item.get("reason", "")
-            verified.append(candidate)
 
-    return {"conflicts": verified, "llm_available": True, "llm_error": None}
+        conflict_type = item.get("type", "unrelated")
+
+        if conflict_type == "duplicate":
+            # 重复：跳过，不创建新记忆
+            candidate = candidates[idx]
+            candidate["llm_reason"] = item.get("reason", "")
+            verified_duplicates.append(candidate)
+        elif conflict_type == "update":
+            # 更新：创建新版本，supersede 旧记忆
+            candidate = candidates[idx]
+            candidate["conflict_type"] = "update"
+            candidate["llm_reason"] = item.get("reason", "")
+            verified_conflicts.append(candidate)
+        # supplement 和 unrelated 都不处理，创建独立记忆（默认行为）
+
+    return {
+        "conflicts": verified_conflicts,
+        "duplicates": verified_duplicates,
+        "llm_available": True,
+        "llm_error": None,
+    }
 
 
 async def detect_conflicts_with_llm(
