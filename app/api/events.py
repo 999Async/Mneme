@@ -1,5 +1,7 @@
 """统一入口：Plugin before_agent_start / agent_end → Python 业务逻辑"""
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +13,7 @@ from app.utils.datetime import ms_to_strftime
 from app.services.conflict_service import detect_conflicts_with_llm
 from app.services.memory_service import create_memory, supersede_memory
 from app.services.context_service import save_snapshot
+from app.services import feishu_base_service
 
 router = APIRouter()
 
@@ -90,6 +93,11 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         # 选择表情：有冲突更新用 THUMBSUP，普通存储用 DONE
         emoji = "THUMBSUP" if conflicts else "DONE"
 
+        # 多维表格同步（完全后台，不阻塞响应）
+        asyncio.create_task(_sync_base_background(
+            owner_id, memory, [c["id"] for c in conflicts],
+        ))
+
         return ok({
             "action": "react",
             "reaction_emoji": emoji,
@@ -133,6 +141,11 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         )
         await supersede_memory(db, old, new_memory.id)
 
+        # 多维表格同步（后台）
+        asyncio.create_task(_sync_base_background(
+            owner_id, new_memory, [old.id],
+        ))
+
         return ok({
             "action": "react",
             "reaction_emoji": "THUMBSUP",
@@ -153,11 +166,20 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         results = await search_memories(db, query=clean, owner_id=owner_id, limit=5)
 
         if results:
-            text = "\n".join(f"- [{r.type}] {r.content}" for r in results)
+            # 返回结构化记忆数据，bridge 构建卡片
+            mem_list = []
+            for r in results:
+                mem_list.append({
+                    "id": r.id,
+                    "type": r.type,
+                    "content": r.content,
+                    "strength": round(r.strength, 2),
+                    "version": r.version,
+                })
             return ok({
                 "action": "reply",
-                "reply_text": f"找到 {len(results)} 条相关记忆：\n{text}",
-                "relevant_memories": [],
+                "reply_text": f"找到 {len(results)} 条相关记忆",
+                "relevant_memories": mem_list,
             })
         return ok({
             "action": "reply",
@@ -263,3 +285,30 @@ def _parse_owner_id(session_key: str | None) -> str:
     if len(parts) >= 3:
         return parts[2]
     return session_key
+
+
+async def _sync_base_background(chat_id: str, memory, conflict_ids: list[str]):
+    """后台执行多维表格同步（ensure + upsert），不阻塞主响应"""
+    try:
+        from app.services.memory_service import get_memory as _get_mem
+        from app.db.session import async_session
+
+        base_config = await feishu_base_service.ensure_base(chat_id)
+        if not base_config:
+            return
+
+        async with async_session() as db:
+            # 同步新记忆
+            await feishu_base_service.upsert_record(memory)
+            # 同步被覆写的旧记忆
+            for cid in conflict_ids:
+                old_mem = await _get_mem(db, cid)
+                if old_mem:
+                    await feishu_base_service.upsert_record(old_mem)
+            # 首次创建时通过 bridge 发通知
+            if base_config.get("url"):
+                from app.services.feishu_push_service import feishu_push
+                await feishu_push.send_text(chat_id, f"📊 记忆管理面板已创建：{base_config['url']}")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("base 后台同步失败: %s", e)

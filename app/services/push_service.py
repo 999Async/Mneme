@@ -174,35 +174,62 @@ async def find_l2_candidates(
 
 
 def _build_l1_card(memory: Memory) -> dict:
-    """构建 L1 飞书卡片 JSON 2.0"""
+    """构建 L1 飞书卡片（1.0 格式，支持按钮交互）
+
+    注意：Card JSON 2.0 不支持 action tag，按钮卡片必须用 1.0 格式。
+    """
     return {
-        "schema": "2.0",
-        "config": {"width_mode": "fill"},
+        "config": {"wide_screen_mode": True},
         "header": {
             "title": {"tag": "plain_text", "content": "📌 记忆提醒"},
             "template": "orange",
         },
-        "body": {
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"**{memory.content}**",
-                },
-                {
-                    "tag": "markdown",
-                    "content": f"<text_tag color='grey'>来源：群聊 | {ms_to_strftime(memory.created_at, '%m月%d日')}</text_tag>",
-                },
-            ],
-        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**{memory.content}**"},
+            },
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"<font color='grey'>来源：群聊 | {ms_to_strftime(memory.created_at, '%m月%d日')}</font>"},
+            },
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "✅ 已复习"},
+                        "type": "primary",
+                        "value": {"action": "review", "memory_id": memory.id, "chat_id": memory.source_chat_id or ""},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🙋 已处理"},
+                        "type": "default",
+                        "value": {"action": "done", "memory_id": memory.id, "chat_id": memory.source_chat_id or ""},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "❌ 不再提醒"},
+                        "type": "danger",
+                        "value": {"action": "dismiss", "memory_id": memory.id, "chat_id": memory.source_chat_id or ""},
+                    },
+                ],
+            },
+        ],
     }
 
 
 def _extract_card_text(card: dict) -> str:
     """从卡片 JSON 中提取记忆文本（降级用）"""
     try:
-        elements = card.get("body", {}).get("elements", [])
+        elements = card.get("elements", [])
         for el in elements:
-            content = el.get("content", "")
+            text_obj = el.get("text", {})
+            content = text_obj.get("content", "")
+            if content and "**" in content:
+                return content.strip("*")
             if content and not content.startswith("<text_tag"):
                 return content.strip("*")
     except Exception:

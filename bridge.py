@@ -190,8 +190,52 @@ def build_reply_card(title: str, body_text: str, template: str = "blue") -> dict
     }
 
 
+def build_search_result_card(title: str, memories: list[dict]) -> dict:
+    """构建搜索结果卡片（1.0 格式，支持按钮交互）"""
+    elements = []
+    for i, m in enumerate(memories, 1):
+        strength = m.get("strength", 1.0)
+        # 强度条：用 ▓░ 可视化
+        filled = int(strength * 8)
+        bar = "▓" * filled + "░" * (8 - filled)
+        version = m.get("version", 1)
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**{i}.** [{m.get('type', 'fact')}] {m.get('content', '')}"},
+        })
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"<font color='grey'>强度: {bar} {strength} | v{version}</font>"},
+        })
+
+    # 添加查看版本历史按钮（取第一条记忆）
+    if memories:
+        first = memories[0]
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "📋 查看版本历史"},
+                    "type": "default",
+                    "value": {"action": "history", "memory_id": first["id"], "chat_id": first.get("chat_id", "")},
+                },
+            ],
+        })
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"🔍 {title}"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
 # ── Mneme API 客户端 ──────────────────────────────────────────────────
-async def forward_to_mneme(client: httpx.AsyncClient, session_key: str, content: str, is_mentioned: bool, message_id: str = "") -> dict | None:
+async def forward_to_mneme(client: httpx.AsyncClient, session_key: str, content: str, is_mentioned: bool, message_id: str = "", event_id: str = "") -> dict | None:
     """POST 到 Mneme /api/events/message"""
     payload = {
         "session_key": session_key,
@@ -200,6 +244,8 @@ async def forward_to_mneme(client: httpx.AsyncClient, session_key: str, content:
     }
     if message_id:
         payload["message_id"] = message_id
+    if event_id:
+        payload["event_id"] = event_id
     try:
         resp = await client.post(
             f"{MNEME_URL}/api/events/message",
@@ -290,7 +336,10 @@ async def process_event(client: httpx.AsyncClient, event: dict):
 
     log.info("收到消息 [%s] %s (mention=%s): %s", chat_type, chat_id, is_mentioned, content[:80])
 
-    result = await forward_to_mneme(client, session_key, content, is_mentioned, message_id)
+    # 构建 event_id 用于幂等去重（飞书事件用 message_id 即可，同一消息不会有两个 message_id）
+    event_id = event.get("event_id", "") or message_id
+
+    result = await forward_to_mneme(client, session_key, content, is_mentioned, message_id, event_id)
     if not result or not result.get("ok"):
         log.warning("Mneme 返回异常: %s", result)
         return
@@ -308,9 +357,16 @@ async def process_event(client: httpx.AsyncClient, event: dict):
 
     elif action == "reply":
         reply_text = data.get("reply_text", "")
+        relevant_memories = data.get("relevant_memories", [])
         if not reply_text:
             return
-        card = build_reply_card("Mneme", reply_text, "blue")
+
+        # 有结构化记忆数据时用带按钮的搜索结果卡片
+        if relevant_memories:
+            card = build_search_result_card(reply_text, relevant_memories)
+        else:
+            card = build_reply_card("Mneme", reply_text, "blue")
+
         if message_id:
             # 有 message_id 时用飞书回复 API（引用形式）
             log.info("引用卡片回复 [%s] → msg %s", chat_id, message_id)

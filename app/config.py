@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
 
+    # Feishu Base (多维表格同步)
+    feishu_base_enabled: bool = True
+
+    # Feishu card callback
+    feishu_callback_token: str = ""
+
     # Plugin auth
     mneme_service_token: str = ""
 

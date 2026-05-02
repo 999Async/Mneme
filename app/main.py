@@ -33,7 +33,7 @@ app = FastAPI(
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     # Skip auth for health check and docs, or when no token configured
-    if request.url.path in ("/health", "/docs", "/openapi.json", "/redoc"):
+    if request.url.path in ("/health", "/docs", "/openapi.json", "/redoc", "/api/callbacks/card-action"):
         return await call_next(request)
     if not settings.mneme_service_token:
         return await call_next(request)
@@ -59,6 +59,7 @@ from app.api.context_snapshots import router as snapshots_router  # noqa: E402
 from app.api.cron import router as cron_router  # noqa: E402
 from app.api.push_logs import router as push_logs_router  # noqa: E402
 from app.api.memory_logs import router as memory_logs_router  # noqa: E402
+from app.api.callbacks import router as callbacks_router  # noqa: E402
 
 app.include_router(events_router, prefix="/api/events", tags=["events"])
 app.include_router(memories_router, prefix="/api/memories", tags=["memories"])
@@ -68,3 +69,4 @@ app.include_router(snapshots_router, prefix="/api/context-snapshots", tags=["con
 app.include_router(cron_router, prefix="/api/cron", tags=["cron"])
 app.include_router(push_logs_router, prefix="/api/push-logs", tags=["push-logs"])
 app.include_router(memory_logs_router, prefix="/api/memory-logs", tags=["memory-logs"])
+app.include_router(callbacks_router, prefix="/api/callbacks", tags=["callbacks"])
