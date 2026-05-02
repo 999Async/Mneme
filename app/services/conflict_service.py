@@ -16,6 +16,7 @@ CANDIDATE_THRESHOLD = 0.5  # 三路评分候选阈值（降级用）
 CONFLICT_THRESHOLD = 0.75  # 三路评分高置信阈值（降级用）
 EMBEDDING_THRESHOLD = 0.7  # embedding 相似度冲突阈值
 EMBEDDING_HIGH_CONF = 0.85  # embedding 高置信阈值（跳过 LLM）
+DUPLICATE_THRESHOLD = 0.95  # 去重阈值：内容完全相同或语义相似度 >= 此值视为重复
 
 
 def _score_entity_overlap(tags_a: dict, tags_b: dict) -> float:
