@@ -82,6 +82,21 @@ async def create_memory_api(body: CreateMemoryReq, db: AsyncSession = Depends(ge
     await db.commit()
     await db.refresh(memory)
 
+    # 7. 同步到多维表格（新记忆 + 被覆写的旧记忆）
+    try:
+        from app.services import feishu_base_service
+        # 同步新记忆
+        await feishu_base_service.upsert_record(memory)
+        # 同步被覆写的旧记忆（状态更新为 superseded）
+        if overwritten_id:
+            old_mem = await get_memory(db, overwritten_id)
+            if old_mem:
+                await feishu_base_service.upsert_record(old_mem)
+    except Exception as e:
+        # Base 同步失败不影响主流程
+        import logging
+        logging.getLogger(__name__).warning("Base sync failed: %s", e)
+
     return ok({
         "id": memory.id,
         "scope": memory.scope,
