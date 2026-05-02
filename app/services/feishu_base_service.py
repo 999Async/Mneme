@@ -487,23 +487,35 @@ async def upsert_record(memory: Any) -> bool:
 
     # 如果没有缓存的 record_id，尝试通过主字段（记忆ID）查找现有记录
     if not record_id:
+        logger.info("未找到缓存的 record_id (记忆ID: %s)，尝试通过主字段查找", memory.id)
         search_result = await _lark_cli_with_retry(
             "base", "+record-search",
             "--base-token", app_token,
             "--table-id", table_id,
-            "--format", "json",  # 确保返回 JSON 格式
+            "--format", "json",
             "--json", json.dumps({
                 "keyword": str(memory.id),
                 "search_fields": [primary_name],
-                "limit": 1
+                "limit": 10
             }, ensure_ascii=False),
             "--as", "bot",
         )
         if search_result and search_result.get("ok"):
             items = search_result.get("data", {}).get("items", [])
-            if items and len(items) > 0:
-                # 找到现有记录，使用其 record_id
-                record_id = items[0].get("record_id")
+            logger.info("record-search 找到 %d 条记录", len(items))
+            # 在结果中查找完全匹配主字段值的记录
+            for item in items:
+                record_id_candidate = item.get("record_id")
+                fields = item.get("fields", {})
+                # 检查主字段值是否完全匹配
+                if str(fields.get(primary_name, "")) == str(memory.id):
+                    record_id = record_id_candidate
+                    logger.info("找到匹配记录，record_id=%s", record_id)
+                    break
+            if not record_id:
+                logger.warning("未找到匹配记录，将创建新记录。搜索结果: %s", json.dumps(search_result, ensure_ascii=False)[:500])
+        else:
+            logger.warning("record-search 失败: %s", json.dumps(search_result, ensure_ascii=False)[:200] if search_result else "None")
 
     # 构建记录值
     from app.utils.datetime import ms_to_strftime
