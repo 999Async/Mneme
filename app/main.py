@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -7,6 +8,17 @@ from sqlalchemy import text
 from fastapi.responses import JSONResponse
 
 from app.config import settings
+
+# 配置日志级别
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# 设置 uvicorn 的日志级别
+logging.getLogger("uvicorn").setLevel(logging.INFO)
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 
 
 @asynccontextmanager
@@ -19,6 +31,46 @@ async def lifespan(app: FastAPI):
         # Enable pgvector extension for PostgreSQL
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+
+    # 清理无效的buffer数据（防止测试数据残留）
+    try:
+        from app.cache import redis_client
+        from app.services.message_buffer_service import _buffer_key, _ts_key
+        import json
+
+        # 扫描所有buffer keys
+        keys = await redis_client.scan_keys("mneme:buffer:*")
+        # 排除时间戳keys（mneme:buffer:ts:*）
+        buffer_keys = [k for k in keys if not k.endswith(":ts") and ":ts:" not in k]
+
+        for buffer_key in buffer_keys:
+            try:
+                # 获取所有数据并验证
+                raw = await redis_client.lrange(buffer_key, 0, -1)
+                if not raw:
+                    continue
+
+                malformed_items = []
+                for item in raw:
+                    try:
+                        json.loads(item)
+                    except (json.JSONDecodeError, TypeError):
+                        malformed_items.append(item)
+
+                # 如果有无效数据，清理整个buffer
+                if malformed_items:
+                    owner_id = buffer_key.replace("mneme:buffer:", "")
+                    logging.warning(f"Cleaning malformed buffer data for {owner_id}: {len(malformed_items)} items")
+                    await redis_client.delete(buffer_key)
+                    await redis_client.delete(_ts_key(owner_id))
+            except Exception as e:
+                logging.error(f"Error cleaning buffer key {buffer_key}: {e}")
+
+        if buffer_keys:
+            logging.info(f"Validated {len(buffer_keys)} buffer keys at startup")
+    except Exception as e:
+        logging.warning(f"Buffer cleanup failed (continuing anyway): {e}")
+
     yield
 
 
