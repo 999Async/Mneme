@@ -98,10 +98,10 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         # 选择表情：有冲突更新用 THUMBSUP，普通存储用 DONE
         emoji = "THUMBSUP" if conflicts else "DONE"
 
-        # 多维表格同步（完全后台，不阻塞响应）
-        asyncio.create_task(_sync_base_background(
-            owner_id, memory, [c["id"] for c in conflicts],
-        ))
+        # 多维表格同步（暂时禁用，统一在 API 层处理以避免重复同步）
+        # asyncio.create_task(_sync_base_background(
+        #     owner_id, memory, [c["id"] for c in conflicts],
+        # ))
 
         return ok({
             "action": "react",
