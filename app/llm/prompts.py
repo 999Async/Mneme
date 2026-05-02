@@ -1,34 +1,19 @@
 """LLM 提示词模板"""
 
-CONFLICT_DETECTION_PROMPT = """你是一个记忆冲突检测助手。判断新信息是否与已有记忆冲突。
+CONFLICT_DETECTION_PROMPT = """你是一个记忆冲突检测助手。判断新记忆与已有记忆的关系。
 
-新信息：{content}
+新记忆：{content}
 
 已有记忆：
 {memories_text}
 
-判断标准：
-1. 是否同一主题的更新？（如 "周报发给A" → "周报发给B" 是 update）
-2. 是否相互矛盾？（如 "用MySQL" vs "用MongoDB" 是 update）
-3. 是否时间上有先后关系？（新信息替代旧信息）
-4. 是否完全不相关？（不同项目/不同话题的相似信息不算冲突）
+请判断每条已有记忆与新记忆的关系类型：
+- duplicate: 重复（语义完全相同，无新信息，不应创建新记忆）
+- update: 更新（有新信息或修正，应创建新版本替代旧记忆）
+- supplement: 补充（新增信息，应保留两者）
+- unrelated: 无关（完全不同的话题）
 
-返回 JSON：
-{{
-  "items": [
-    {{
-      "index": 0,
-      "has_conflict": true/false,
-      "type": "update|cancel|supplement|none",
-      "reason": "简要说明原因"
-    }}
-  ]
-}}
-
-注意：
-- 不同项目的相同技术话题不算冲突
-- 补充信息（supplement）不算冲突
-- 只有明确的更新/取消/矛盾才算冲突"""
+返回 JSON 格式。"""
 
 MEMORY_EXTRACTION_PROMPT = """以下是一段团队群聊记录，请提取其中值得长期记住的关键信息。
 
@@ -68,16 +53,19 @@ CONFLICT_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "index": {"type": "integer", "description": "候选记忆的索引"},
+                    "index": {"type": "integer"},
                     "has_conflict": {"type": "boolean"},
-                    "type": {"type": "string", "enum": ["update", "cancel", "supplement", "none"]},
-                    "reason": {"type": "string", "description": "简要说明原因"},
+                    "type": {
+                        "type": "string",
+                        "enum": ["duplicate", "update", "supplement", "unrelated"]
+                    },
+                    "reason": {"type": "string"}
                 },
-                "required": ["index", "has_conflict", "type"],
+                "required": ["index", "has_conflict", "type", "reason"]
             },
         },
     },
-    "required": ["items"],
+    "required": ["items"]
 }
 
 MEMORY_EXTRACTION_SCHEMA = {
