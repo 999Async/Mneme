@@ -356,3 +356,50 @@ async def _find_exact_matches(
             "duplicate_reason": "内容完全相同",
         }]
     return []
+
+
+async def _find_semantic_duplicates(
+    db: AsyncSession,
+    content: str,
+    owner_id: str,
+    scope: str,
+    exclude_id: str | None = None,
+) -> list[dict]:
+    """查找语义高度相似的记忆（embedding >= 0.95）
+
+    Returns:
+        [{"id", "content", "similarity_score", "duplicate_reason"}]
+    """
+    from app.llm.embedding import encode as encode_embedding
+
+    query_vec = await encode_embedding(content)
+    if not query_vec:
+        return []
+
+    stmt = (
+        select(Memory, (1 - Memory.embedding.cosine_distance(query_vec)).label("similarity"))
+        .where(
+            Memory.owner_id == owner_id,
+            Memory.scope == scope,
+            Memory.active == True,
+            Memory.embedding != None,
+        )
+        .order_by(Memory.embedding.cosine_distance(query_vec))
+        .limit(1)
+    )
+    if exclude_id:
+        stmt = stmt.where(Memory.id != exclude_id)
+
+    result = await db.execute(stmt)
+    row = result.first()
+
+    if row:
+        memory, sim = row
+        if sim >= DUPLICATE_THRESHOLD:
+            return [{
+                "id": memory.id,
+                "content": memory.content,
+                "similarity_score": round(sim, 3),
+                "duplicate_reason": f"语义相似度 {sim:.2f}",
+            }]
+    return []
