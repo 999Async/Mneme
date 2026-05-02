@@ -322,3 +322,37 @@ async def detect_conflicts_with_llm(
         "llm_available": llm_result["llm_available"],
         "llm_error": llm_result["llm_error"],
     }
+
+
+async def _find_exact_matches(
+    db: AsyncSession,
+    content: str,
+    owner_id: str,
+    scope: str,
+    exclude_id: str | None = None,
+) -> list[dict]:
+    """查找内容完全相同的记忆
+
+    Returns:
+        [{"id", "content", "similarity_score", "duplicate_reason"}]
+    """
+    stmt = select(Memory).where(
+        Memory.owner_id == owner_id,
+        Memory.scope == scope,
+        Memory.active == True,
+        Memory.content == content,
+    )
+    if exclude_id:
+        stmt = stmt.where(Memory.id != exclude_id)
+
+    result = await db.execute(stmt.limit(1))
+    memory = result.scalar_one_or_none()
+
+    if memory:
+        return [{
+            "id": memory.id,
+            "content": memory.content,
+            "similarity_score": 1.0,
+            "duplicate_reason": "内容完全相同",
+        }]
+    return []
