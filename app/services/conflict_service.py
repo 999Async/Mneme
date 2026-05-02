@@ -403,3 +403,24 @@ async def _find_semantic_duplicates(
                 "duplicate_reason": f"语义相似度 {sim:.2f}",
             }]
     return []
+
+
+async def detect_duplicates(
+    db: AsyncSession,
+    *,
+    content: str,
+    owner_id: str,
+    scope: str,
+    exclude_id: str | None = None,
+) -> list[dict]:
+    """检测重复记忆
+
+    优先检测内容完全相同的记忆，若无则检测语义高度相似的记忆。
+
+    Returns:
+        [{"id", "content", "similarity_score", "duplicate_reason"}]
+    """
+    exact = await _find_exact_matches(db, content, owner_id, scope, exclude_id)
+    if exact:
+        return exact
+    return await _find_semantic_duplicates(db, content, owner_id, scope, exclude_id)
