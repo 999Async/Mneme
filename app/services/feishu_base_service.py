@@ -491,7 +491,11 @@ async def upsert_record(memory: Any) -> bool:
             "base", "+record-search",
             "--base-token", app_token,
             "--table-id", table_id,
-            "--json", json.dumps({primary_name: memory.id}, ensure_ascii=False),
+            "--json", json.dumps({
+                "keyword": str(memory.id),
+                "search_fields": [primary_name],
+                "limit": 1
+            }, ensure_ascii=False),
             "--as", "bot",
         )
         if search_result:
