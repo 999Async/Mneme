@@ -91,6 +91,11 @@ def _record_redis_key(memory_id: str) -> str:
     return f"{_RECORD_KEY_PREFIX}:{memory_id}"
 
 
+def _sync_lock_key(memory_id: str) -> str:
+    """Base 同步锁，防止重复同步"""
+    return f"{_RECORD_KEY_PREFIX}:sync_lock:{memory_id}"
+
+
 # ── 字段定义 ────────────────────────────────────────────────────────────
 
 # 飞书支持的字段类型白名单
@@ -467,6 +472,15 @@ async def upsert_record(memory: Any) -> bool:
     """新建/更新多维表格记录。memory 需要有 id, type, content, strength, version, active, created_at, tags 等属性。"""
     if not settings.feishu_base_enabled:
         return False
+
+    # 检查同步锁，防止重复同步（10秒内的重复同步会被跳过）
+    sync_lock_key = _sync_lock_key(memory.id)
+    existing_lock = await redis_client.get(sync_lock_key)
+    if existing_lock:
+        logger.debug("跳过重复同步: memory_id=%s", memory.id)
+        return True
+    # 设置同步锁（10秒TTL）
+    await redis_client.set(sync_lock_key, "1", ttl_seconds=10)
 
     # 获取 base 配置
     # 从 memory.source_chat_id 获取 chat_id
