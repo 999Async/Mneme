@@ -12,8 +12,10 @@ from app.models import Memory
 logger = logging.getLogger(__name__)
 
 # 阈值配置
-CANDIDATE_THRESHOLD = 0.5  # 初筛候选阈值
-CONFLICT_THRESHOLD = 0.75  # 高置信冲突阈值（直接判定，跳过 LLM）
+CANDIDATE_THRESHOLD = 0.5  # 三路评分候选阈值（降级用）
+CONFLICT_THRESHOLD = 0.75  # 三路评分高置信阈值（降级用）
+EMBEDDING_THRESHOLD = 0.7  # embedding 相似度冲突阈值
+EMBEDDING_HIGH_CONF = 0.85  # embedding 高置信阈值（跳过 LLM）
 
 
 def _score_entity_overlap(tags_a: dict, tags_b: dict) -> float:
@@ -68,6 +70,58 @@ def compute_similarity(content: str, tags: dict, other: Memory) -> float:
     s2 = _score_keyword_overlap(tags, other.tags or {})
     s3 = _score_substring_match(content, other.content)
     return s1 + s2 + s3
+
+
+async def _detect_conflicts_by_embedding(
+    db: AsyncSession,
+    content: str,
+    owner_id: str,
+    scope: str,
+    exclude_id: str | None = None,
+) -> list[dict]:
+    """用 embedding 余弦相似度做冲突初筛（主要路径）
+
+    embedding 已存在于每条记忆中，零额外 API 调用。
+    只需生成新内容的 embedding（1 次 API 调用）。
+    """
+    from app.llm.embedding import encode as encode_embedding
+
+    query_vec = await encode_embedding(content)
+    if not query_vec:
+        return []
+
+    stmt = (
+        select(
+            Memory,
+            (1 - Memory.embedding.cosine_distance(query_vec)).label("similarity"),
+        )
+        .where(
+            Memory.owner_id == owner_id,
+            Memory.scope == scope,
+            Memory.active == True,
+            Memory.embedding != None,
+        )
+        .order_by(Memory.embedding.cosine_distance(query_vec))
+        .limit(10)
+    )
+    if exclude_id:
+        stmt = stmt.where(Memory.id != exclude_id)
+
+    result = await db.execute(stmt)
+    conflicts = []
+    for memory, sim in result.all():
+        if sim >= EMBEDDING_THRESHOLD:
+            conflicts.append({
+                "id": memory.id,
+                "content": memory.content,
+                "similarity_score": round(sim, 3),
+                "conflict_reason": f"语义相似度 {sim:.2f}",
+                "created_at": memory.created_at,
+                "needs_llm_verify": sim < EMBEDDING_HIGH_CONF,
+            })
+
+    conflicts.sort(key=lambda x: x["similarity_score"], reverse=True)
+    return conflicts
 
 
 async def detect_conflicts(
@@ -195,15 +249,50 @@ async def detect_conflicts_with_llm(
     scope: str,
     exclude_id: str | None = None,
 ) -> dict:
-    """双阈值 + LLM 增强的冲突检测
+    """冲突检测：embedding 优先，降级到三路评分
+
+    流程：
+    1. embedding 余弦相似度初筛（主要路径，利用已有 embedding）
+    2. 降级：embedding 不可用时回退到三路评分（实体+关键词+子串）
+    3. 对低置信候选用 LLM 验证
 
     Returns:
-        {
-            "conflicts": [...],
-            "llm_available": bool,
-            "llm_error": str | None,
-        }
+        {"conflicts": [...], "llm_available": bool, "llm_error": str | None}
     """
+    # 路径 1：embedding 相似度初筛
+    try:
+        embedding_conflicts = await _detect_conflicts_by_embedding(
+            db, content, owner_id, scope, exclude_id,
+        )
+    except Exception as e:
+        logger.warning("embedding 冲突检测失败，降级到三路评分: %s", e)
+        embedding_conflicts = []
+
+    if embedding_conflicts:
+        high = [c for c in embedding_conflicts if not c.get("needs_llm_verify")]
+        low = [c for c in embedding_conflicts if c.get("needs_llm_verify")]
+
+        if low:
+            llm_result = await llm_verify_conflict(content, low)
+            verified = llm_result["conflicts"]
+            for c in verified:
+                c.pop("needs_llm_verify", None)
+            llm_available = llm_result["llm_available"]
+            llm_error = llm_result["llm_error"]
+        else:
+            verified = []
+            llm_available = True
+            llm_error = None
+
+        for c in high:
+            c.pop("needs_llm_verify", None)
+
+        merged = high + verified
+        merged.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return {"conflicts": merged, "llm_available": llm_available, "llm_error": llm_error}
+
+    # 路径 2：降级到三路评分（原有逻辑）
+    logger.info("embedding 无冲突候选，使用三路评分降级")
     all_candidates = await detect_conflicts(
         db,
         content=content, tags=tags,
@@ -211,25 +300,19 @@ async def detect_conflicts_with_llm(
         exclude_id=exclude_id,
     )
 
-    # 分离高置信和需验证的候选
     high_confidence = [c for c in all_candidates if not c.get("needs_llm_verify")]
     need_verify = [c for c in all_candidates if c.get("needs_llm_verify")]
 
-    # 清理输出字段
     for c in high_confidence:
         c.pop("needs_llm_verify", None)
 
     if not need_verify:
         return {"conflicts": high_confidence, "llm_available": True, "llm_error": None}
 
-    # LLM 验证低置信候选
     llm_result = await llm_verify_conflict(content, need_verify)
-
-    # 清理 LLM 确认的候选字段
     for c in llm_result["conflicts"]:
         c.pop("needs_llm_verify", None)
 
-    # 合并：高置信 + LLM 确认的
     merged = high_confidence + llm_result["conflicts"]
     merged.sort(key=lambda x: x["similarity_score"], reverse=True)
 

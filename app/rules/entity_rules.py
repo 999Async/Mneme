@@ -24,7 +24,7 @@ ENGLISH_NAME_PATTERN = re.compile(
 NICKNAME_PATTERN = re.compile(r"[老小][\u4e00-\u9fff]")
 
 # 项目名模式：含 "项目" 或大写字母+数字组合
-PROJECT_PATTERN = re.compile(r"([\u4e00-\u9fff]{2,8}项目|[A-Z][A-Z0-9\-]{1,20})")
+PROJECT_PATTERN = re.compile(r"([\u4e00-\u9fff]{2,6}项目)")
 
 # 日期表达
 DATE_PATTERN = re.compile(
@@ -52,50 +52,96 @@ SENSITIVE_PATTERN = re.compile(
 )
 
 
-def extract_entities(content: str) -> dict[str, list[str] | dict]:
-    """从消息中提取实体（扩展版：支持@提及、英文名、昵称）
+def extract_entities(content: str) -> dict[str, list[str]]:
+    """jieba 词性标注 + 正则补齐 提取实体
 
-    Returns:
-        {"person": [...], "project": [...], "date": [...], "config": [...]}
+    主力：jieba.posseg（nr=人名, ns=地名, nt=机构, eng=英文, t=时间词）
+    补齐：PERSON_PATTERN（中文+后缀如"张三同学"）、PROJECT_PATTERN、@提及、昵称
+    过滤：英文 blacklist + stopwords、时间误匹配、类型冲突去重
     """
-    entities: dict[str, list[str]] = {}
+    import jieba.posseg as pseg
 
-    # 人员名提取（多模式合并）
-    persons = set()
+    persons, locations, orgs, techs, dates = set(), set(), set(), set(), set()
 
-    # 1. 中文 + 后缀
+    # 英文 stopwords：非技术实体的常见词
+    ENG_STOPWORDS = {
+        # URL 片段
+        "http", "https", "com", "org", "net", "www", "api", "io", "dev",
+        # 英文虚词
+        "the", "is", "at", "of", "in", "on", "to", "for", "and", "or",
+        "not", "with", "by", "from", "as", "this", "that", "it",
+        "can", "use", "set", "get", "run", "all", "new", "key",
+        "true", "false", "null", "type", "name", "id", "no", "yes",
+        # 非技术英文词
+        "example", "test", "local", "admin", "user", "data", "time",
+        "env", "db", "sql", "url", "app",
+    }
+
+    # jieba 词性标注
+    for word, flag in pseg.cut(content):
+        if flag == "nr" and len(word) >= 2:
+            persons.add(word)
+        elif flag == "ns":
+            locations.add(word)
+        elif flag == "nt":
+            orgs.add(word)
+        elif flag == "eng" and len(word) >= 2:
+            lower = word.lower()
+            # blacklist 过滤（技术术语不是实体）
+            if lower in ENGLISH_NAME_BLACKLIST:
+                continue
+            # stopwords 过滤
+            if lower in ENG_STOPWORDS:
+                continue
+            techs.add(word)
+        elif flag == "t" and word not in ("正在",):
+            dates.add(word)
+
+    # 正则补齐：中文+后缀人名（"张三同学"、"王总"）
     for match in PERSON_PATTERN.finditer(content):
         persons.add(match.group(0))
 
-    # 2. @提及
+    # @提及（jieba 不识别 @ 模式）
     for match in MENTION_PATTERN.finditer(content):
         persons.add(match.group(0))
 
-    # 3. 昵称（老王, 小李）
+    # 昵称（老王, 小李）
     for match in NICKNAME_PATTERN.finditer(content):
         persons.add(match.group(0))
 
-    # 4. 英文名（排除技术术语）
-    for match in ENGLISH_NAME_PATTERN.finditer(content):
-        name = match.group(1)
-        if name not in ENGLISH_NAME_BLACKLIST and len(name) >= 2:
-            persons.add(name)
+    # 项目名正则补齐（只取中文+项目 的模式，英文项目名靠 jieba eng 识别）
+    for match in PROJECT_PATTERN.finditer(content):
+        proj = match.group(1)
+        # 只保留中文项目名（如"XX项目"），跳过英文子串误匹配
+        if proj and any('\u4e00' <= c <= '\u9fff' for c in proj):
+            techs.add(proj)
 
-    if persons:
-        entities["person"] = list(persons)
+    # 日期正则补齐（jieba 可能漏掉组合日期如"下周五"）
+    for d in DATE_PATTERN.findall(content):
+        dates.add(d)
 
-    # 项目名
-    projects = list(set(PROJECT_PATTERN.findall(content) or []))
-    if projects:
-        entities["project"] = projects
+    # 类型冲突去重：同一段文字不应同时出现在多个类别
+    # 优先级：person > date > tech > org > location
+    _used = set()
+    entities: dict[str, list[str]] = {}
 
-    # 日期
-    dates = list(set(DATE_PATTERN.findall(content) or []))
-    if dates:
-        entities["date"] = dates
+    for word_list, key in [
+        (persons, "person"),
+        (dates, "date"),
+        (techs, "tech"),
+        (orgs, "org"),
+        (locations, "location"),
+    ]:
+        unique = []
+        for w in word_list:
+            if w not in _used:
+                unique.append(w)
+                _used.add(w)
+        if unique:
+            entities[key] = unique
 
-    # 配置/密钥
-    configs = list(set(CONFIG_PATTERN.findall(content) or []))
+    # 配置/密钥（安全敏感，保持正则）
+    configs = list(set(CONFIG_PATTERN.findall(content)))
     if configs:
         entities["config"] = configs
 

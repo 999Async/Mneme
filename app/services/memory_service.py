@@ -22,6 +22,7 @@ async def create_memory(
     source_message_id: str | None = None,
     source_chat_id: str | None = None,
     parent_id: str | None = None,
+    embedding: list[float] | None = None,
 ) -> Memory:
     """创建记忆"""
     memory = Memory(
@@ -47,11 +48,14 @@ async def create_memory(
     )
     db.add(log)
 
-    # Generate embedding for vector search
-    from app.llm.embedding import encode as encode_embedding
-    embedding = await encode_embedding(content)
+    # Embedding：复用预计算的，或现场生成
     if embedding is not None:
         memory.embedding = embedding
+    else:
+        from app.llm.embedding import encode as encode_embedding
+        emb = await encode_embedding(content)
+        if emb is not None:
+            memory.embedding = emb
 
     await db.commit()
     await db.refresh(memory)
