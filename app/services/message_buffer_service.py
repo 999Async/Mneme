@@ -246,6 +246,9 @@ async def extract_from_buffer(
 
             extracted_count += 1
 
+    # 提交所有数据库更改
+    await db.commit()
+
     # 清理缓冲区
     await redis_client.delete(_buffer_key(owner_id))
     await redis_client.delete(_ts_key(owner_id))

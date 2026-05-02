@@ -125,7 +125,10 @@ async def get_history(db: AsyncSession, memory_id: str) -> list[Memory]:
 
 
 async def supersede_memory(db: AsyncSession, old_memory: Memory, new_memory_id: str) -> None:
-    """将旧记忆标记为被覆写，新记忆继承重复计数+1"""
+    """将旧记忆标记为被覆写，新记忆继承重复计数+1
+
+    注意：此函数不提交事务，调用者需要负责 await db.commit()
+    """
     old_memory.active = False
     old_memory.superseded_by = new_memory_id
     old_memory.updated_at = ms_now()
@@ -141,7 +144,6 @@ async def supersede_memory(db: AsyncSession, old_memory: Memory, new_memory_id: 
         detail={"overwritten_by": new_memory_id, "reason": "conflict detected"},
     )
     db.add(log)
-    await db.commit()
 
     from app.services.search_service import invalidate_search_cache
     await invalidate_search_cache()

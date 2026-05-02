@@ -145,6 +145,8 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             parent_id=old.id,
         )
         await supersede_memory(db, old, new_memory.id)
+        db.add(new_memory)
+        await db.commit()
 
         # 多维表格同步（后台）
         asyncio.create_task(_sync_base_background(
