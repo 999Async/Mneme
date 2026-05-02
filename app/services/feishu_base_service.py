@@ -485,12 +485,27 @@ async def upsert_record(memory: Any) -> bool:
     # 检查是否有已有 record_id
     record_id = await redis_client.get(_record_redis_key(memory.id))
 
+    # 如果没有缓存的 record_id，尝试通过主字段（记忆ID）查找现有记录
+    if not record_id:
+        search_result = await _lark_cli_with_retry(
+            "base", "+record-search",
+            "--base-token", app_token,
+            "--table-id", table_id,
+            "--json", json.dumps({primary_name: memory.id}, ensure_ascii=False),
+            "--as", "bot",
+        )
+        if search_result:
+            items = search_result.get("data", {}).get("items", [])
+            if items and len(items) > 0:
+                # 找到现有记录，使用其 record_id
+                record_id = items[0].get("record_id")
+
     # 构建记录值
     from app.utils.datetime import ms_to_strftime
 
     tags = getattr(memory, "tags", {}) or {}
-    keywords = tags.get("keywords", [])
-    tags_str = ", ".join(keywords) if isinstance(keywords, list) else str(keywords)
+    entities = tags.get("entities", [])
+    tags_str = ", ".join(entities) if isinstance(entities, list) else str(entities)
 
     status = "active"
     if not getattr(memory, "active", True):
