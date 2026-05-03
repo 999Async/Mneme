@@ -514,6 +514,9 @@ async def upsert_record(memory: Any) -> bool:
             "--as", "bot",
         )
 
+        # 详细记录完整的 API 响应用于调试
+        logger.info("record-list API 响应: %s", json.dumps(list_result, ensure_ascii=False)[:500] if list_result else "None")
+
         if list_result and list_result.get("ok"):
             items = list_result.get("data", {}).get("items", [])
             logger.info("record-list 返回 %d 条记录 (记忆ID: %s)", len(items), memory.id)
@@ -522,10 +525,10 @@ async def upsert_record(memory: Any) -> bool:
             for i, item in enumerate(items[:3]):
                 record_id_debug = item.get("record_id", "未知")
                 fields_debug = item.get("fields", {})
-                logger.debug("记录 %d: record_id=%s, 字段=%s", i, record_id_debug, list(fields_debug.keys())[:5])
+                logger.info("记录 %d: record_id=%s, 字段=%s", i, record_id_debug, list(fields_debug.keys())[:5])
                 # 显示主字段值
                 primary_value_debug = str(fields_debug.get(primary_name, "(主字段未找到)"))
-                logger.debug("记录 %d 主字段(%s)值: %s", i, primary_name, primary_value_debug)
+                logger.info("记录 %d 主字段(%s)值: %s", i, primary_name, primary_value_debug)
 
             # 在结果中查找完全匹配主字段值的记录
             for item in items:
@@ -544,7 +547,7 @@ async def upsert_record(memory: Any) -> bool:
                 if len(items) > 0:
                     logger.warning("将创建新记录（可能产生重复）")
         else:
-            logger.error("record-list 失败: %s", json.dumps(list_result, ensure_ascii=False)[:300] if list_result else "None")
+            logger.error("record-list 失败: %s", json.dumps(list_result, ensure_ascii=False)[:500] if list_result else "None")
 
     # 构建记录值
     from app.utils.datetime import ms_to_strftime
