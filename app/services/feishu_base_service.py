@@ -518,33 +518,31 @@ async def upsert_record(memory: Any) -> bool:
         logger.info("record-list API 响应: %s", json.dumps(list_result, ensure_ascii=False)[:500] if list_result else "None")
 
         if list_result and list_result.get("ok"):
-            items = list_result.get("data", {}).get("items", [])
-            logger.info("record-list 返回 %d 条记录 (记忆ID: %s)", len(items), memory.id)
+            # record-list 返回的是二维数组，不是对象数组
+            # 数据结构: {"data": {"data": [[field1, field2, ...], [field1, field2, ...]]}
+            data_array = list_result.get("data", {}).get("data", [])
+            if not data_array:
+                data_array = list_result.get("data", [])
+
+            logger.info("record-list 返回 %d 条记录 (数据类型: %s)", len(data_array), type(data_array).__name__)
 
             # 显示前几条记录的信息用于调试
-            for i, item in enumerate(items[:3]):
-                record_id_debug = item.get("record_id", "未知")
-                fields_debug = item.get("fields", {})
-                logger.info("记录 %d: record_id=%s, 字段=%s", i, record_id_debug, list(fields_debug.keys())[:5])
-                # 显示主字段值
-                primary_value_debug = str(fields_debug.get(primary_name, "(主字段未找到)"))
-                logger.info("记录 %d 主字段(%s)值: %s", i, primary_name, primary_value_debug)
+            for i, row in enumerate(data_array[:3]):
+                logger.info("记录 %d (数组格式): %s", i, str(row)[:100])
 
-            # 在结果中查找完全匹配主字段值的记录
-            for item in items:
-                record_id_candidate = item.get("record_id")
-                fields = item.get("fields", {})
-                # 检查主字段值是否完全匹配
-                primary_value = str(fields.get(primary_name, ""))
-                if primary_value == str(memory.id):
-                    record_id = record_id_candidate
-                    logger.info("✓ 找到匹配记录: record_id=%s, primary_value=%s", record_id, primary_value)
+            # 在二维数组中查找匹配的记忆ID
+            # 主字段是第一列（索引 0），record_id 是最后一列
+            for row in data_array:
+                if len(row) > 0 and str(row[0]) == str(memory.id):
+                    # record_id 是最后一列
+                    record_id = row[-1] if len(row) > 1 else None
+                    logger.info("✓ 找到匹配记录: record_id=%s, 主字段值=%s", record_id, row[0])
                     break
 
             if not record_id:
                 logger.warning("✗ 未找到匹配记录。记忆ID=%s, 主字段名=%s, 返回记录数=%s",
-                           memory.id, primary_name, len(items))
-                if len(items) > 0:
+                           memory.id, primary_name, len(data_array))
+                if len(data_array) > 0:
                     logger.warning("将创建新记录（可能产生重复）")
         else:
             logger.error("record-list 失败: %s", json.dumps(list_result, ensure_ascii=False)[:500] if list_result else "None")
