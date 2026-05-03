@@ -86,7 +86,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
                 await supersede_memory(db, old, memory.id)
                 memory.parent_id = old.id
                 memory.version = old.version + 1
-                db.add(memory)
+                # 注意：memory 已经在 create_memory 中被 add 和 commit，这里不需要再次 add
                 await db.commit()
 
         conflict_info = ""
@@ -96,7 +96,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             conflict_info += "（⚠️ AI 服务暂时不可用，冲突检测可能不够准确）"
 
         # 选择表情：有冲突更新用 THUMBSUP，普通存储用 DONE
-        emoji = "THUMBSUP" if conflicts else "DONE"
+        emoji = "Get" if conflicts else "DONE"
 
         # 多维表格同步（完全后台，不阻塞响应）
         asyncio.create_task(_sync_base_background(
@@ -145,7 +145,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             parent_id=old.id,
         )
         await supersede_memory(db, old, new_memory.id)
-        db.add(new_memory)
+        # 注意：new_memory 已经在 create_memory 中被 add 和 commit，这里不需要再次 add
         await db.commit()
 
         # 多维表格同步（后台）
@@ -155,7 +155,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
         return ok({
             "action": "react",
-            "reaction_emoji": "THUMBSUP",
+            "reaction_emoji": "Get",
             "reply_text": f"已更新记忆（v{old.version} → v{old.version + 1}）",
             "relevant_memories": [],
         })
