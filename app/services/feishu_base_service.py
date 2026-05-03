@@ -3,7 +3,10 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any
+
+import httpx
 
 from app.cache import redis_client
 from app.config import settings
@@ -501,51 +504,23 @@ async def upsert_record(memory: Any) -> bool:
 
     # 如果没有缓存的 record_id，尝试通过主字段（记忆ID）查找现有记录
     if not record_id:
-        logger.info("未找到缓存的 record_id (记忆ID: %s)，尝试获取所有记录查找", memory.id)
-        logger.info("Base 配置: primary_name=%s, table_id=%s", primary_name, table_id)
+        logger.info("未找到缓存的 record_id (记忆ID: %s)，通过飞书 API 查找", memory.id)
 
-        # 使用 record-list 获取所有记录（增加限制以确保获取所有记录）
-        list_result = await _lark_cli_with_retry(
-            "base", "+record-list",
-            "--base-token", app_token,
-            "--table-id", table_id,
-            "--limit", "200",  # 增加到 200
-            "--format", "json",
-            "--as", "bot",
+        # 直接调用飞书 API 查找 record_id（lark-cli 的 record-list 不返回 record_id）
+        record_id = await _find_record_id_by_api(
+            app_token, table_id, primary_name, memory.id
         )
 
-        # 详细记录完整的 API 响应用于调试
-        logger.info("record-list API 响应: %s", json.dumps(list_result, ensure_ascii=False)[:500] if list_result else "None")
-
-        if list_result and list_result.get("ok"):
-            # record-list 返回的是二维数组，不是对象数组
-            # 数据结构: {"data": {"data": [[field1, field2, ...], [field1, field2, ...]]}
-            data_array = list_result.get("data", {}).get("data", [])
-            if not data_array:
-                data_array = list_result.get("data", [])
-
-            logger.info("record-list 返回 %d 条记录 (数据类型: %s)", len(data_array), type(data_array).__name__)
-
-            # 显示前几条记录的信息用于调试
-            for i, row in enumerate(data_array[:3]):
-                logger.info("记录 %d (数组格式): %s", i, str(row)[:100])
-
-            # 在二维数组中查找匹配的记忆ID
-            # 主字段是第一列（索引 0），record_id 是最后一列
-            for row in data_array:
-                if len(row) > 0 and str(row[0]) == str(memory.id):
-                    # record_id 是最后一列
-                    record_id = row[-1] if len(row) > 1 else None
-                    logger.info("✓ 找到匹配记录: record_id=%s, 主字段值=%s", record_id, row[0])
-                    break
-
-            if not record_id:
-                logger.warning("✗ 未找到匹配记录。记忆ID=%s, 主字段名=%s, 返回记录数=%s",
-                           memory.id, primary_name, len(data_array))
-                if len(data_array) > 0:
-                    logger.warning("将创建新记录（可能产生重复）")
+        if record_id:
+            logger.info("✓ 找到匹配记录: memory_id=%s, record_id=%s", memory.id, record_id)
+            # 缓存 record_id
+            await redis_client.set(
+                _record_redis_key(memory.id),
+                record_id,
+                ttl_seconds=_PERMANENT_TTL,
+            )
         else:
-            logger.error("record-list 失败: %s", json.dumps(list_result, ensure_ascii=False)[:500] if list_result else "None")
+            logger.info("✗ 未找到匹配记录，将创建新记录。记忆ID=%s", memory.id)
 
     # 构建记录值
     from app.utils.datetime import ms_to_strftime
@@ -649,6 +624,82 @@ async def invalidate_cache(chat_id: str) -> None:
     """清除指定 chat 的 base 配置缓存"""
     await redis_client.delete(_base_redis_key(chat_id))
     logger.info("已清除 base 缓存: chat_id=%s", chat_id)
+
+
+async def _get_tenant_access_token() -> str | None:
+    """获取飞书 API 的 tenant_access_token"""
+    app_id = getattr(settings, "feishu_app_id", "")
+    app_secret = getattr(settings, "feishu_app_secret", "")
+    if not app_id or not app_secret:
+        return None
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            json={"app_id": app_id, "app_secret": app_secret},
+        )
+        data = resp.json()
+        if data.get("code") == 0:
+            return data.get("tenant_access_token")
+        return None
+
+
+async def _find_record_id_by_api(
+    app_token: str,
+    table_id: str,
+    primary_name: str,
+    memory_id: str,
+) -> str | None:
+    """直接调用飞书 API 查找 record_id
+
+    使用 record-search API 按主字段（记忆ID）过滤查找。
+    返回 record_id 或 None。
+    """
+    token = await _get_tenant_access_token()
+    if not token:
+        logger.warning("无法获取 tenant_access_token")
+        return None
+
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
+
+    payload = {
+        "filter": {
+            "conditions": [
+                {
+                    "field_name": primary_name,
+                    "operator": "is",
+                    "value": [memory_id]
+                }
+            ],
+            "conjunction": "and"
+        },
+        "limit": 10
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=10.0,
+            )
+            result = resp.json()
+            logger.info("record-search API 返回: %s", json.dumps(result, ensure_ascii=False)[:500])
+
+            if result.get("code") == 0:
+                items = result.get("data", {}).get("items", [])
+                for item in items:
+                    # 验证主字段值匹配
+                    fields = item.get("fields", {})
+                    primary_value = fields.get(primary_name)
+                    if primary_value and isinstance(primary_value, list) and len(primary_value) > 0:
+                        if primary_value[0].get("text") == memory_id:
+                            return item.get("record_id")
+            return None
+    except Exception as e:
+        logger.warning("record-search API 调用异常: %s", e)
+        return None
 
 
 def _estimate_next_review(memory: Any) -> str:
