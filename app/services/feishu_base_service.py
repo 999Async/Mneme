@@ -311,6 +311,12 @@ async def ensure_base(chat_id: str) -> dict | None:
         logger.error("字段创建验证失败，不缓存配置")
         return None
 
+    # 清理多余的默认字段（在字段创建后再次尝试删除）
+    await _cleanup_extra_fields(app_token, table_id, primary_name)
+
+    # 配置默认视图按"状态"字段分组
+    await _configure_default_view_group(app_token, table_id)
+
     # 给群聊成员授予编辑权限
     await _grant_edit_access(app_token, chat_id)
 
@@ -412,6 +418,51 @@ async def _delete_default_fields(app_token: str, table_id: str, primary_name: st
         await asyncio.sleep(0.5)
 
 
+async def _cleanup_extra_fields(app_token: str, table_id: str, primary_name: str) -> None:
+    """在字段创建后再次清理多余的默认字段（如"日期"等飞书自动创建的字段）"""
+    our_names = {f["name"] for f in FIELDS} | {primary_name}
+
+    result = await _lark_cli_with_retry(
+        "base", "+field-list",
+        "--base-token", app_token,
+        "--table-id", table_id,
+        "--limit", "50",
+        "--as", "bot",
+    )
+    if not result:
+        return
+
+    data = result.get("data", result)
+    fields = data.get("fields", data.get("items", []))
+
+    for field in fields:
+        name = field.get("name", "")
+        field_id = field.get("id", field.get("field_id", ""))
+        is_primary = field.get("is_primary", False)
+
+        if not field_id:
+            continue
+
+        # 保护主字段和我们的字段
+        if is_primary or name in our_names or field == fields[0]:
+            continue
+
+        # 删除多余字段（如"日期"、"单选"、"附件"等飞书默认字段）
+        ok = await _lark_cli_with_retry(
+            "base", "+field-delete",
+            "--base-token", app_token,
+            "--table-id", table_id,
+            "--field-id", field_id,
+            "--yes",
+            "--as", "bot",
+        )
+        if ok:
+            logger.info("清理多余字段: %s (%s)", name, field_id)
+        else:
+            logger.warning("清理多余字段失败: %s (%s)", name, field_id)
+        await asyncio.sleep(0.5)
+
+
 async def _create_fields(app_token: str, table_id: str) -> None:
     """逐个创建字段（串行，带重试，避免并发冲突）。"""
     for field_def in FIELDS:
@@ -469,6 +520,72 @@ async def _verify_fields(app_token: str, table_id: str, primary_name: str) -> bo
         logger.error("字段缺失: %s (现有字段: %s)", missing, existing)
         return False
     return True
+
+
+async def _configure_default_view_group(app_token: str, table_id: str) -> None:
+    """配置默认视图按"状态"字段分组"""
+    # 获取视图列表
+    views_result = await _lark_cli_with_retry(
+        "base", "+view-list",
+        "--base-token", app_token,
+        "--table-id", table_id,
+        "--limit", "50",
+        "--as", "bot",
+    )
+    if not views_result:
+        logger.warning("获取视图列表失败，跳过分组配置")
+        return
+
+    data = views_result.get("data", views_result)
+    views = data.get("views", data.get("items", []))
+    if not views:
+        logger.warning("没有找到视图，跳过分组配置")
+        return
+
+    # 找到默认视图（通常是第一个 grid 视图，或者第一个视图）
+    default_view = None
+    for view in views:
+        view_type = view.get("type", "")
+        if view_type == "grid":
+            default_view = view
+            break
+
+    if not default_view:
+        default_view = views[0]
+
+    view_id = default_view.get("id", "")
+    view_name = default_view.get("name", "")
+    view_type = default_view.get("type", "")
+
+    if not view_id:
+        logger.warning("无法获取默认视图 ID")
+        return
+
+    # 只有 grid/kanban/gantt 视图支持分组
+    if view_type not in ("grid", "kanban", "gantt"):
+        logger.info("视图类型 %s 不支持分组，跳过配置", view_type)
+        return
+
+    # 配置按"状态"字段分组
+    group_config = {
+        "group_config": [
+            {"field": "状态", "desc": False}
+        ]
+    }
+
+    result = await _lark_cli_with_retry(
+        "base", "+view-set-group",
+        "--base-token", app_token,
+        "--table-id", table_id,
+        "--view-id", view_id,
+        "--json", json.dumps(group_config, ensure_ascii=False),
+        "--as", "bot",
+    )
+
+    if result:
+        logger.info("默认视图已配置按'状态'分组: %s (%s)", view_name, view_id)
+    else:
+        logger.warning("配置视图分组失败: %s", view_name)
 
 
 async def upsert_record(memory: Any) -> bool:
