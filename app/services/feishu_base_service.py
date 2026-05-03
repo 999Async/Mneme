@@ -502,32 +502,49 @@ async def upsert_record(memory: Any) -> bool:
     # 如果没有缓存的 record_id，尝试通过主字段（记忆ID）查找现有记录
     if not record_id:
         logger.info("未找到缓存的 record_id (记忆ID: %s)，尝试获取所有记录查找", memory.id)
-        # 使用 record-list 获取所有记录（限制100条以提高性能）
+        logger.info("Base 配置: primary_name=%s, table_id=%s", primary_name, table_id)
+
+        # 使用 record-list 获取所有记录（增加限制以确保获取所有记录）
         list_result = await _lark_cli_with_retry(
             "base", "+record-list",
             "--base-token", app_token,
             "--table-id", table_id,
-            "--field-id", primary_name,  # 只获取主字段
-            "--limit", "100",
+            "--limit", "200",  # 增加到 200
             "--format", "json",
             "--as", "bot",
         )
+
         if list_result and list_result.get("ok"):
             items = list_result.get("data", {}).get("items", [])
-            logger.info("record-list 返回 %d 条记录", len(items))
+            logger.info("record-list 返回 %d 条记录 (记忆ID: %s)", len(items), memory.id)
+
+            # 显示前几条记录的信息用于调试
+            for i, item in enumerate(items[:3]):
+                record_id_debug = item.get("record_id", "未知")
+                fields_debug = item.get("fields", {})
+                logger.debug("记录 %d: record_id=%s, 字段=%s", i, record_id_debug, list(fields_debug.keys())[:5])
+                # 显示主字段值
+                primary_value_debug = str(fields_debug.get(primary_name, "(主字段未找到)"))
+                logger.debug("记录 %d 主字段(%s)值: %s", i, primary_name, primary_value_debug)
+
             # 在结果中查找完全匹配主字段值的记录
             for item in items:
                 record_id_candidate = item.get("record_id")
                 fields = item.get("fields", {})
                 # 检查主字段值是否完全匹配
-                if str(fields.get(primary_name, "")) == str(memory.id):
+                primary_value = str(fields.get(primary_name, ""))
+                if primary_value == str(memory.id):
                     record_id = record_id_candidate
-                    logger.info("找到匹配记录 (record_id=%s)", record_id)
+                    logger.info("✓ 找到匹配记录: record_id=%s, primary_value=%s", record_id, primary_value)
                     break
+
             if not record_id:
-                logger.warning("未找到匹配记录，将创建新记录")
+                logger.warning("✗ 未找到匹配记录。记忆ID=%s, 主字段名=%s, 返回记录数=%s",
+                           memory.id, primary_name, len(items))
+                if len(items) > 0:
+                    logger.warning("将创建新记录（可能产生重复）")
         else:
-            logger.warning("record-list 失败: %s", json.dumps(list_result, ensure_ascii=False)[:200] if list_result else "None")
+            logger.error("record-list 失败: %s", json.dumps(list_result, ensure_ascii=False)[:300] if list_result else "None")
 
     # 构建记录值
     from app.utils.datetime import ms_to_strftime
