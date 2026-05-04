@@ -103,7 +103,7 @@ def _sync_lock_key(memory_id: str) -> str:
 
 # 飞书支持的字段类型白名单
 _SUPPORTED_FIELD_TYPES = {"text", "number", "select", "datetime", "user", "group_chat",
-                          "checkbox", "url", "phone", "email", "location", "link"}
+                          "checkbox", "url", "phone", "email", "location", "link", "attachment"}
 
 FIELDS: list[dict] = [
     # "记忆ID" 不在此列表中 — 直接使用飞书默认主字段 "文本" 存储
@@ -119,11 +119,6 @@ FIELDS: list[dict] = [
         ],
     },
     {"type": "text", "name": "内容"},
-    {
-        "type": "number",
-        "name": "强度",
-        "style": {"type": "progress", "color": "Blue", "precision": 2},
-    },
     {"type": "number", "name": "版本"},
     {
         "type": "select",
@@ -136,9 +131,10 @@ FIELDS: list[dict] = [
         ],
     },
     {"type": "datetime", "name": "创建时间", "style": {"format": "yyyy-MM-dd HH:mm"}},
-    {"type": "datetime", "name": "下次提醒", "style": {"format": "yyyy-MM-dd HH:mm"}},
     {"type": "text", "name": "标签"},
     {"type": "text", "name": "来源"},
+    {"type": "text", "name": "父记忆ID"},
+    {"type": "text", "name": "附件", "style": {"type": "url"}},
 ]
 
 # 飞书默认主字段名（不可删除/重命名），用于存储记忆 ID
@@ -170,64 +166,33 @@ async def _detect_primary_field(app_token: str, table_id: str) -> str:
     # 策略1: 找 is_primary=true
     for f in fields:
         if f.get("is_primary", False):
+            field_id = f.get("id", f.get("field_id", ""))
             return f.get("name", "")
 
     # 策略2: 首列即主键
+    logger.info("未找到 is_primary 字段，首列作为主键")
     return fields[0].get("name", "")
 
 
-async def _detect_primary_field_info(app_token: str, table_id: str) -> tuple[str, str]:
-    """检测主字段的 (name, field_id)"""
-    result = await _lark_cli_with_retry(
-        "base", "+field-list",
-        "--base-token", app_token,
-        "--table-id", table_id,
-        "--limit", "50",
-        "--as", "bot",
-    )
-    if not result:
-        return "", ""
-    data = result.get("data", result)
-    fields = data.get("fields", data.get("items", []))
-    if not fields:
-        return "", ""
-
-    for f in fields:
-        if f.get("is_primary", False):
-            return f.get("name", ""), f.get("id", f.get("field_id", ""))
-
-    # 兜底：首列即主键
-    f0 = fields[0]
-    return f0.get("name", ""), f0.get("id", f0.get("field_id", ""))
-
-
-async def _rename_primary_field(app_token: str, table_id: str) -> str | None:
+async def _rename_primary_field(app_token: str, table_id: str, primary_name: str) -> str | None:
     """尝试将默认主字段重命名为"记忆ID"。
 
     成功返回 "记忆ID"，失败返回原主字段名，无法检测返回 None。
     """
-    name, field_id = await _detect_primary_field_info(app_token, table_id)
-    if not field_id:
-        logger.warning("无法检测主字段 ID")
-        return name or None
-
-    if name == "记忆ID":
-        return "记忆ID"
-
     result = await _lark_cli_with_retry(
         "base", "+field-update",
         "--base-token", app_token,
         "--table-id", table_id,
-        "--field-id", "文本",
+        "--field-id", primary_name,
         "--json", json.dumps({"name": "记忆ID", "type": "text"}, ensure_ascii=False),
         "--as", "bot",
     )
     if result:
-        logger.info("主字段已重命名: %s → 记忆ID", name)
+        logger.info("主字段已重命名: %s → 记忆ID", primary_name)
         return "记忆ID"
     else:
-        logger.warning("主字段重命名失败（%s → 记忆ID），保留原名", name)
-        return name
+        logger.warning("主字段重命名失败（%s → 记忆ID），保留原名", primary_name)
+        return primary_name
 
 
 # ── 核心 API ────────────────────────────────────────────────────────────
@@ -298,7 +263,7 @@ async def ensure_base(chat_id: str) -> dict | None:
     logger.info("检测到主字段: %s", primary_name)
 
     # 尝试将主字段重命名为"记忆ID"（失败则保留原名）
-    renamed = await _rename_primary_field(app_token, table_id)
+    renamed = await _rename_primary_field(app_token, table_id, primary_name)
     if renamed:
         primary_name = renamed
 
@@ -652,21 +617,29 @@ async def upsert_record(memory: Any) -> bool:
 
     created_str = ms_to_strftime(getattr(memory, "created_at", 0), "%Y-%m-%d %H:%M:%S") if getattr(memory, "created_at", 0) else ""
 
-    # 计算下次提醒时间（基于遗忘曲线）
-    next_review_str = _estimate_next_review(memory)
+    # 处理附件字段：取第一个链接或合并多个链接
+    attachments = getattr(memory, "attachments", {}) or {}
+    urls = attachments.get("urls", []) if isinstance(attachments, dict) else []
+    attachment_str = ""
+    if urls:
+        # 飞书 URL 字段格式：如果有多个链接，用换行符分隔
+        attachment_str = "\n".join(urls) if isinstance(urls, list) else str(urls)
 
     fields = {
         primary_name: memory.id,  # 动态检测的主字段存储记忆ID
         "类型": getattr(memory, "type", "fact"),
         "内容": getattr(memory, "content", "")[:500],  # 截断过长内容
-        "强度": round(getattr(memory, "strength", 1.0), 2),
         "版本": getattr(memory, "version", 1),
         "状态": status,
         "创建时间": created_str,
-        "下次提醒": next_review_str,
         "标签": tags_str,
         "来源": chat_id,
+        "父记忆ID": getattr(memory, "parent_id", "") or "",
     }
+
+    # 只有当有附件时才添加"附件"字段
+    if attachment_str:
+        fields["附件"] = attachment_str
 
     cmd = [
         "base", "+record-upsert",
@@ -817,29 +790,3 @@ async def _find_record_id_by_api(
     except Exception as e:
         logger.warning("record-search API 调用异常: %s", e)
         return None
-
-
-def _estimate_next_review(memory: Any) -> str:
-    """基于遗忘曲线估算下次提醒时间"""
-    from app.utils.datetime import ms_now, ms_to_strftime
-
-    strength = getattr(memory, "strength", 1.0)
-    decay_params = getattr(memory, "decay_params", {}) or {}
-    rate = decay_params.get("base_decay_rate", 0.5)
-    sensitivity = decay_params.get("personal_sensitivity", 1.0)
-
-    # 计算强度降到阈值(0.3)需要多少天
-    import math
-    threshold = 0.3
-    if strength <= threshold:
-        return ""  # 已经低于阈值，无需计算
-
-    try:
-        days_until_threshold = math.log(strength / threshold) / (rate * sensitivity)
-    except (ValueError, ZeroDivisionError):
-        return ""
-
-    # 转为毫秒时间戳
-    now_ms = ms_now()
-    next_review_ms = now_ms + int(days_until_threshold * 86400 * 1000)
-    return ms_to_strftime(next_review_ms, "%Y-%m-%d %H:%M:%S")

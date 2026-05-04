@@ -4,6 +4,7 @@ import re
 
 from app.rules.entity_rules import desensitize, extract_entities, extract_keywords
 from app.rules.extraction_rules import match_extraction_rules
+from app.utils.link_extractor import extract_links
 
 # 抽取置信度阈值（PRD BR-001-01）
 CONFIDENCE_THRESHOLD = 0.7
@@ -11,15 +12,17 @@ CONFIDENCE_THRESHOLD = 0.7
 
 class ExtractedMemory:
     """抽取结果"""
-    __slots__ = ("content", "type", "tags", "confidence", "context_snapshot")
+    __slots__ = ("content", "type", "tags", "confidence", "context_snapshot", "attachments")
 
     def __init__(self, content: str, mem_type: str, tags: dict,
-                 confidence: float, context_snapshot: str | None = None):
+                 confidence: float, context_snapshot: str | None = None,
+                 attachments: dict | None = None):
         self.content = content
         self.type = mem_type
         self.tags = tags
         self.confidence = confidence
         self.context_snapshot = context_snapshot
+        self.attachments = attachments or {"urls": []}
 
     def to_dict(self) -> dict:
         return {
@@ -28,6 +31,7 @@ class ExtractedMemory:
             "tags": self.tags,
             "confidence": self.confidence,
             "context_snapshot": self.context_snapshot,
+            "attachments": self.attachments,
         }
 
 
@@ -43,13 +47,16 @@ def extract(content: str, context_messages: list[str] | None = None) -> Extracte
 
     mem_type, base_conf = matches[0]
 
+    # 提取链接，分离自然语言和附件
+    clean_content, urls = extract_links(content)
+
     # 提取 entity + keywords
-    entities = extract_entities(content)
-    keywords = extract_keywords(content)
+    entities = extract_entities(clean_content)
+    keywords = extract_keywords(clean_content)
     tags = {"keywords": keywords, "entities": entities}
 
     # 脱敏
-    safe_content = desensitize(content)
+    safe_content = desensitize(clean_content)
 
     # 置信度调整：有实体提取加分
     confidence = base_conf
@@ -70,6 +77,7 @@ def extract(content: str, context_messages: list[str] | None = None) -> Extracte
         tags=tags,
         confidence=confidence,
         context_snapshot=context_snapshot,
+        attachments={"urls": urls} if urls else None,
     )
 
 
@@ -90,14 +98,18 @@ def extract_from_command(content: str, scope: str) -> ExtractedMemory:
             clean = clean[len(prefix):].strip()
             break
 
-    entities = extract_entities(clean)
-    keywords = extract_keywords(clean)
+    # 提取链接，分离自然语言和附件
+    clean_content, urls = extract_links(clean)
+
+    entities = extract_entities(clean_content)
+    keywords = extract_keywords(clean_content)
     tags = {"keywords": keywords, "entities": entities}
-    safe_content = desensitize(clean)
+    safe_content = desensitize(clean_content)
 
     return ExtractedMemory(
         content=safe_content,
         mem_type="command" if scope == "group" else "fact",
         tags=tags,
         confidence=1.0,
+        attachments={"urls": urls} if urls else None,
     )

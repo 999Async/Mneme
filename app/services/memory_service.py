@@ -23,6 +23,7 @@ async def create_memory(
     source_chat_id: str | None = None,
     parent_id: str | None = None,
     embedding: list[float] | None = None,
+    attachments: dict | None = None,
 ) -> Memory:
     """创建记忆"""
     memory = Memory(
@@ -37,6 +38,7 @@ async def create_memory(
         source_message_id=source_message_id,
         source_chat_id=source_chat_id,
         parent_id=parent_id,
+        attachments=attachments or {"urls": []},
     )
     db.add(memory)
 

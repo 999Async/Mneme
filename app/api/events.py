@@ -67,6 +67,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             source_chat_id=owner_id,
             source_message_id=body.message_id,
             embedding=pre_embedding,
+            attachments=extracted.attachments,
         )
 
         # 保存上下文快照（best-effort，用于心流恢复）
@@ -143,6 +144,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             source_chat_id=owner_id,
             source_message_id=body.message_id,
             parent_id=old.id,
+            attachments=extracted.attachments,
         )
         await supersede_memory(db, old, new_memory.id)
         # 注意：new_memory 已经在 create_memory 中被 add 和 commit，这里不需要再次 add
