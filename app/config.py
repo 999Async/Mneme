@@ -34,11 +34,22 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
 
-    # Embedding (OpenAI 兼容接口)
+    # Embedding (OpenAI 兼容接口 or 本地模型)
+    embedding_type: str = "api"  # "api" or "local"
+    embedding_model_path: str = ""  # 本地模型路径（如 sentence-transformers 模型）
     embedding_api_key: str = ""
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
+    embedding_device: str = "cpu"  # "cpu" or "cuda"
+
+    # Rerank (LLM / API / 本地模型)
+    rerank_type: str = "llm"  # "llm", "api", or "local"
+    rerank_model_path: str = ""  # 本地 rerank 模型路径
+    rerank_api_key: str = ""  # rerank API key
+    rerank_base_url: str = ""  # rerank API base URL
+    rerank_model: str = ""  # rerank API model name
+    rerank_device: str = "cpu"  # "cpu" or "cuda"
 
     # Decay params
     decay_base_rate: float = 0.5
