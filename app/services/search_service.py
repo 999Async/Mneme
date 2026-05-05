@@ -1,4 +1,4 @@
-"""搜索服务：向量搜索 + LLM Rerank + Redis 缓存"""
+"""搜索服务：向量搜索 + Rerank + Redis 缓存"""
 
 import hashlib
 import json
@@ -8,8 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache import redis_client
-from app.llm.client import chat
 from app.llm.embedding import encode as encode_embedding
+from app.llm.rerank import rerank
 from app.models import Memory
 
 logger = logging.getLogger(__name__)
@@ -97,105 +97,6 @@ async def _vector_search(
     return results
 
 
-# ─── LLM Rerank ───
-
-
-async def _rerank_with_llm(
-    query: str,
-    candidates: list[tuple[float, Memory]],
-) -> list[tuple[float, Memory]]:
-    """使用 LLM 对向量召回结果进行 rerank
-
-    Args:
-        query: 用户查询
-        candidates: [(similarity, Memory), ...] 向量召回的候选结果
-
-    Returns:
-        [(rerank_score, Memory), ...] rerank 后的结果
-    """
-    if not candidates:
-        return []
-
-    # 构建候选记忆列表
-    memories_text = ""
-    for idx, (_, m) in enumerate(candidates, 1):
-        memories_text += f"{idx}. {m.content}\n"
-
-    prompt = f"""你是一个搜索结果排序专家。请根据用户查询，对以下记忆内容按相关性进行排序。
-
-用户查询：{query}
-
-候选记忆：
-{memories_text}
-
-请返回一个 JSON 数组，包含最相关的前 10 条记忆的编号（按相关性从高到低排序）。
-格式：{{"rankings": [1, 3, 2, ...]}}
-
-只返回最相关的记忆，不要包含无关或低相关性的记忆。"""
-
-    response = await chat([
-        {"role": "user", "content": prompt}
-    ], temperature=0.1, max_tokens=200)
-
-    if not response.get("ok"):
-        logger.warning("LLM rerank 失败: %s", response.get("error"))
-        # 降级：返回原向量排序结果
-        return candidates
-
-    try:
-        content = response.get("content", "").strip()
-
-        # 尝试提取 JSON（处理可能的前后文本）
-        import re
-
-        # 先尝试移除 markdown 代码块标记
-        content = re.sub(r'```(?:json)?\n?', '', content)
-        content = re.sub(r'```', '', content)
-
-        # 查找 {...} 模式
-        json_match = re.search(r'\{[^{}]*"rankings"\s*:\s*\[[^\]]*\][^{}]*\}', content)
-        if json_match:
-            content = json_match.group(0)
-        else:
-            # 尝试直接解析数组
-            array_match = re.search(r'\[[\d,\s]+\]', content)
-            if array_match:
-                content = f'{{"rankings": {array_match.group(0)}}}'
-
-        logger.info("LLM rerank 原始返回: %s", response.get("content", "")[:100])
-
-        # 解析 JSON 结果
-        match = json.loads(content)
-        rankings = match.get("rankings", [])
-
-        if not rankings:
-            logger.warning("LLM rerank 返回空结果，使用向量排序")
-            return candidates
-
-        logger.info("LLM rerank 排序: %s", rankings)
-
-        # 重新排序
-        ranked = []
-        candidates_dict = {i: (sim, m) for i, (sim, m) in enumerate(candidates)}
-        for rank in rankings:
-            idx = rank - 1  # 转换为 0-based 索引
-            if idx in candidates_dict:
-                # rerank 分数：向量相似度 * (1 - 排名衰减)
-                # 第1名: 1.0, 第2名: 0.95, 第3名: 0.9, ...
-                sim, m = candidates_dict[idx]
-                rerank_score = sim * (1.0 - (rank - 1) * 0.05)
-                ranked.append((rerank_score, m))
-                logger.info("LLM Rerank: rank=%d, score=%.3f, content=%s",
-                            rank, rerank_score, m.content[:50])
-
-        return ranked if ranked else candidates
-
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.warning("LLM rerank 解析失败: %s, 使用向量排序", e)
-        logger.info("LLM 原始返回: %s", response.get("content", "")[:200])
-        return candidates
-
-
 # ─── 主入口 ───
 
 
@@ -276,18 +177,18 @@ async def search_memories(
     if not scored_results:
         return []
 
-    # --- LLM Rerank ---
+    # --- Rerank ---
     if ENABLE_RERANK and len(scored_results) > 0:
-        logger.info("开始 LLM Rerank...")
-        reranked = await _rerank_with_llm(query, scored_results)
-        if reranked:
+        logger.info("开始 Rerank...")
+        reranked = await rerank(query, scored_results)
+        if reranked and reranked != scored_results:
             # 使用 rerank 结果，再按 strength 加权
             ranked = sorted(
                 reranked,
                 key=lambda x: x[0] * x[1].strength,
                 reverse=True,
             )
-            logger.info("LLM Rerank 完成，返回 %d 条", min(len(ranked), limit))
+            logger.info("Rerank 完成，返回 %d 条", min(len(ranked), limit))
         else:
             # Rerank 失败，使用向量排序
             ranked = sorted(
