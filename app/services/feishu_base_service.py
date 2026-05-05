@@ -1013,7 +1013,7 @@ async def add_chat_tab(chat_id: str, base_url: str) -> bool:
     payload = {
         "chat_tabs": [
             {
-                "tab_name": "团队记忆",
+                "tab_name": "记忆管理",
                 "tab_type": "doc",
                 "tab_content": {"doc": base_url}
             }
