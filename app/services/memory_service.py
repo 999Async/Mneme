@@ -22,6 +22,8 @@ async def create_memory(
     source_message_id: str | None = None,
     source_chat_id: str | None = None,
     parent_id: str | None = None,
+    embedding: list[float] | None = None,
+    attachments: dict | None = None,
 ) -> Memory:
     """创建记忆"""
     memory = Memory(
@@ -36,6 +38,7 @@ async def create_memory(
         source_message_id=source_message_id,
         source_chat_id=source_chat_id,
         parent_id=parent_id,
+        attachments=attachments or {"urls": []},
     )
     db.add(memory)
 
@@ -47,11 +50,14 @@ async def create_memory(
     )
     db.add(log)
 
-    # Generate embedding for vector search
-    from app.llm.embedding import encode as encode_embedding
-    embedding = await encode_embedding(content)
+    # Embedding：复用预计算的，或现场生成
     if embedding is not None:
         memory.embedding = embedding
+    else:
+        from app.llm.embedding import encode as encode_embedding
+        emb = await encode_embedding(content)
+        if emb is not None:
+            memory.embedding = emb
 
     await db.commit()
     await db.refresh(memory)
@@ -121,7 +127,10 @@ async def get_history(db: AsyncSession, memory_id: str) -> list[Memory]:
 
 
 async def supersede_memory(db: AsyncSession, old_memory: Memory, new_memory_id: str) -> None:
-    """将旧记忆标记为被覆写，新记忆继承重复计数+1"""
+    """将旧记忆标记为被覆写，新记忆继承重复计数+1
+
+    注意：此函数不提交事务，调用者需要负责 await db.commit()
+    """
     old_memory.active = False
     old_memory.superseded_by = new_memory_id
     old_memory.updated_at = ms_now()
@@ -137,7 +146,6 @@ async def supersede_memory(db: AsyncSession, old_memory: Memory, new_memory_id: 
         detail={"overwritten_by": new_memory_id, "reason": "conflict detected"},
     )
     db.add(log)
-    await db.commit()
 
     from app.services.search_service import invalidate_search_cache
     await invalidate_search_cache()

@@ -13,13 +13,45 @@ router = APIRouter()
 @router.post("")
 async def create_memory_api(body: CreateMemoryReq, db: AsyncSession = Depends(get_db)):
     """创建记忆（自动抽取 + 显式存储共用）"""
-    # 冲突检测
-    conflicts = await detect_conflicts(
+    # 1. 去重检测（优先于冲突检测）
+    from app.services.conflict_service import detect_duplicates
+    dupes = await detect_duplicates(
+        db, content=body.content, owner_id=body.owner_id, scope=body.scope,
+    )
+    if dupes:
+        return ok({
+            "id": dupes[0]["id"],
+            "scope": body.scope,
+            "type": body.type,
+            "content": dupes[0]["content"],
+            "duplicate": True,
+            "duplicate_reason": dupes[0]["duplicate_reason"],
+            "message": "记忆已存在，未创建新记录",
+        })
+
+    # 2. 冲突检测（现在返回 conflicts 和 duplicates）
+    from app.services.conflict_service import detect_conflicts_with_llm
+    conflict_result = await detect_conflicts_with_llm(
         db, content=body.content, tags=body.tags.model_dump(),
         owner_id=body.owner_id, scope=body.scope,
     )
 
-    # 确定版本链
+    conflicts = conflict_result.get("conflicts", [])
+    llm_duplicates = conflict_result.get("duplicates", [])
+
+    # 3. LLM 判定的重复
+    if llm_duplicates:
+        return ok({
+            "id": llm_duplicates[0]["id"],
+            "scope": body.scope,
+            "type": body.type,
+            "content": llm_duplicates[0]["content"],
+            "duplicate": True,
+            "duplicate_reason": llm_duplicates[0].get("llm_reason", "LLM 判定为重复"),
+            "message": "记忆已存在，未创建新记录",
+        })
+
+    # 4. 确定版本链
     parent_id = None
     version = 1
     if conflicts:
@@ -29,6 +61,7 @@ async def create_memory_api(body: CreateMemoryReq, db: AsyncSession = Depends(ge
             parent_id = old.id
             version = old.version + 1
 
+    # 5. 创建记忆
     memory = await create_memory(
         db, scope=body.scope, owner_id=body.owner_id, type=body.type,
         content=body.content, tags=body.tags.model_dump(),
@@ -38,7 +71,7 @@ async def create_memory_api(body: CreateMemoryReq, db: AsyncSession = Depends(ge
     memory.version = version
     db.add(memory)
 
-    # 覆写旧记忆
+    # 6. 覆写旧记忆
     overwritten_id = None
     if conflicts:
         old = await get_memory(db, conflicts[0]["id"])
@@ -48,6 +81,21 @@ async def create_memory_api(body: CreateMemoryReq, db: AsyncSession = Depends(ge
 
     await db.commit()
     await db.refresh(memory)
+
+    # 7. 同步到多维表格（新记忆 + 被覆写的旧记忆）
+    try:
+        from app.services import feishu_base_service
+        # 同步新记忆
+        await feishu_base_service.upsert_record(memory)
+        # 同步被覆写的旧记忆（状态更新为 superseded）
+        if overwritten_id:
+            old_mem = await get_memory(db, overwritten_id)
+            if old_mem:
+                await feishu_base_service.upsert_record(old_mem)
+    except Exception as e:
+        # Base 同步失败不影响主流程
+        import logging
+        logging.getLogger(__name__).warning("Base sync failed: %s", e)
 
     return ok({
         "id": memory.id,

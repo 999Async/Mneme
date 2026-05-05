@@ -26,6 +26,7 @@ class Memory(Base):
     owner_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     type: Mapped[str] = mapped_column(String(20), nullable=False)  # decision / fact / intent / command
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    attachments: Mapped[dict] = mapped_column(JsonType, nullable=False, default=lambda: {"urls": []})
     context_snapshot: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
     tags: Mapped[dict] = mapped_column(JsonType, nullable=False, default=lambda: {"keywords": [], "entities": {}})
     strength: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)

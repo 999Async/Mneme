@@ -1,5 +1,7 @@
 """统一入口：Plugin before_agent_start / agent_end → Python 业务逻辑"""
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,9 +13,12 @@ from app.utils.datetime import ms_to_strftime
 from app.services.conflict_service import detect_conflicts_with_llm
 from app.services.memory_service import create_memory, supersede_memory
 from app.services.context_service import save_snapshot
+from app.services import feishu_base_service
 
 router = APIRouter()
 
+import logging
+logger = logging.getLogger(__name__)
 
 @router.post("/message")
 async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)):
@@ -36,17 +41,47 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
     if intent == intent_service.Intent.STORE:
         scope = params.get("scope", "personal")
         extracted = extraction_service.extract_from_command(body.content, scope)
-        # 解析 owner_id from session_key (格式: "feishu:chat:oc_xxx" or "feishu:p2p:ou_xxx")
-        owner_id = _parse_owner_id(body.session_key)
+        # 解析 owner_id 和 chat_id
+        owner_id, chat_id = _parse_owner_id(body.sender_id, body.session_key)
 
-        # 冲突检测（LLM 增强）
+        # 预计算 embedding（冲突检测和存储都需要，避免重复 API 调用）
+        from app.llm.embedding import encode
+        pre_embedding = await encode(extracted.content)
+
+        # 去重检测（优先于冲突检测，使用 0.95 高阈值）
+        from app.services.conflict_service import detect_duplicates
+        exact_duplicates = await detect_duplicates(
+            db, content=extracted.content, owner_id=owner_id, scope=scope,
+        )
+        if exact_duplicates:
+            dup_ids = ", ".join([d["id"] for d in exact_duplicates])  # 只显示前 8 位
+            return ok({
+                "action": "reply",
+                "reply_text": f"这条记忆已经存在了哦~",
+                "relevant_memories": [],
+                "push_card": None,
+            })
+
+        # 冲突检测（embedding 优先，降级到三路评分）
         result = await detect_conflicts_with_llm(
             db, content=extracted.content, tags=extracted.tags,
             owner_id=owner_id, scope=scope,
         )
         conflicts = result["conflicts"]
+        llm_duplicates = result.get("duplicates", [])
 
-        # 创建新记忆
+        # LLM 判定的重复
+        if llm_duplicates:
+            dup_ids = ", ".join([d["id"][:8] for d in llm_duplicates])
+            dup_reasons = "; ".join([d.get("llm_reason", "语义相同") for d in llm_duplicates])
+            return ok({
+                "action": "reply",
+                "reply_text": f"这条记忆与已有记忆语义相同，不需要重复记录哦~ 记忆ID: {dup_ids}",
+                "relevant_memories": [],
+                "push_card": None,
+            })
+
+        # 创建新记忆（复用预计算的 embedding）
         context_snapshot = {
             "raw_content": body.content,
             "session_key": body.session_key,
@@ -57,14 +92,16 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             content=extracted.content, tags=extracted.tags,
             confidence=extracted.confidence,
             context_snapshot=context_snapshot,
-            source_chat_id=owner_id,  # owner_id 即 session_key 解析出的 chat_id
+            source_chat_id=chat_id,  # 使用会话 ID，而不是 owner_id
             source_message_id=body.message_id,
+            embedding=pre_embedding,
+            attachments=extracted.attachments,
         )
 
         # 保存上下文快照（best-effort，用于心流恢复）
         try:
             await save_snapshot(
-                db, user_id=owner_id, chat_id=owner_id,
+                db, user_id=owner_id, chat_id=chat_id,  # 使用会话 ID
                 snapshot={"last_content": extracted.content, "session_key": body.session_key},
             )
         except Exception:
@@ -78,7 +115,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
                 await supersede_memory(db, old, memory.id)
                 memory.parent_id = old.id
                 memory.version = old.version + 1
-                db.add(memory)
+                # 注意：memory 已经在 create_memory 中被 add 和 commit，这里不需要再次 add
                 await db.commit()
 
         conflict_info = ""
@@ -88,7 +125,13 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             conflict_info += "（⚠️ AI 服务暂时不可用，冲突检测可能不够准确）"
 
         # 选择表情：有冲突更新用 THUMBSUP，普通存储用 DONE
-        emoji = "THUMBSUP" if conflicts else "DONE"
+        emoji = "Get" if conflicts else "DONE"
+
+        # 多维表格同步（完全后台，不阻塞响应）
+        asyncio.create_task(_sync_base_background(
+            chat_id, memory, [c["id"] for c in conflicts],  # 使用会话 ID
+            session_key=body.session_key, owner_id=owner_id,
+        ))
 
         return ok({
             "action": "react",
@@ -102,7 +145,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
     if intent == intent_service.Intent.OVERWRITE:
         scope = params.get("scope", "personal")
         extracted = extraction_service.extract_from_command(body.content, scope)
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, chat_id = _parse_owner_id(body.sender_id, body.session_key)
 
         # 搜索旧记忆
         from app.services.search_service import search_memories
@@ -127,22 +170,31 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             content=extracted.content, tags=extracted.tags,
             confidence=extracted.confidence,
             context_snapshot={"raw_content": body.content, "session_key": body.session_key},
-            source_chat_id=owner_id,
+            source_chat_id=chat_id,  # 使用会话 ID
             source_message_id=body.message_id,
             parent_id=old.id,
+            attachments=extracted.attachments,
         )
         await supersede_memory(db, old, new_memory.id)
+        # 注意：new_memory 已经在 create_memory 中被 add 和 commit，这里不需要再次 add
+        await db.commit()
+
+        # 多维表格同步（后台）
+        asyncio.create_task(_sync_base_background(
+            chat_id, new_memory, [old.id],  # 使用会话 ID
+            session_key=body.session_key, owner_id=owner_id,
+        ))
 
         return ok({
             "action": "react",
-            "reaction_emoji": "THUMBSUP",
+            "reaction_emoji": "Get",
             "reply_text": f"已更新记忆（v{old.version} → v{old.version + 1}）",
             "relevant_memories": [],
         })
 
     # --- QUERY ---
     if intent == intent_service.Intent.QUERY:
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, _ = _parse_owner_id(body.sender_id, body.session_key)
         # 清理搜索词：去掉 @提及 + 指令关键词
         import re
         clean = re.sub(r"@\S+\s*", "", body.content)
@@ -153,11 +205,20 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         results = await search_memories(db, query=clean, owner_id=owner_id, limit=5)
 
         if results:
-            text = "\n".join(f"- [{r.type}] {r.content}" for r in results)
+            # 返回结构化记忆数据，bridge 构建卡片
+            mem_list = []
+            for r in results:
+                mem_list.append({
+                    "id": r.id,
+                    "type": r.type,
+                    "content": r.content,
+                    "strength": round(r.strength, 2),
+                    "version": r.version,
+                })
             return ok({
                 "action": "reply",
-                "reply_text": f"找到 {len(results)} 条相关记忆：\n{text}",
-                "relevant_memories": [],
+                "reply_text": f"找到 {len(results)} 条相关记忆",
+                "relevant_memories": mem_list,
             })
         return ok({
             "action": "reply",
@@ -168,7 +229,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
     # --- FLOW_RECOVER ---
     if intent == intent_service.Intent.FLOW_RECOVER:
         from app.services.context_service import get_latest_snapshot
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, _ = _parse_owner_id(body.sender_id, body.session_key)
         snapshot = await get_latest_snapshot(db, user_id=owner_id)
         if snapshot:
             return ok({
@@ -184,7 +245,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
     # --- LIST_MY ---
     if intent == intent_service.Intent.LIST_MY:
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, _ = _parse_owner_id(body.sender_id, body.session_key)
         from app.services.memory_service import list_memories
         items, total = await list_memories(db, owner_id=owner_id, active_only=True, page_size=10)
         if items:
@@ -202,7 +263,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
     # --- AUTO_EXTRACT (非 @Mneme 消息) → 缓冲 ---
     if intent == intent_service.Intent.AUTO_EXTRACT:
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, chat_id = _parse_owner_id(body.sender_id, body.session_key)
         from app.services.message_buffer_service import buffer_message, check_count_trigger, extract_from_buffer
         result = await buffer_message(owner_id, body.content, role="user", session_key=body.session_key, message_id=body.message_id)
 
@@ -210,7 +271,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         if result.get("buffered") and len(body.content) >= 5:
             try:
                 await save_snapshot(
-                    db, user_id=owner_id, chat_id=owner_id,
+                    db, user_id=owner_id, chat_id=chat_id,  # 使用会话 ID
                     snapshot={"last_content": body.content, "session_key": body.session_key},
                 )
                 await db.commit()
@@ -235,7 +296,8 @@ async def handle_conversation_end(body: ConversationEndEvent, db: AsyncSession =
     if not body.messages:
         return ok({"extracted": 0})
 
-    owner_id = _parse_owner_id(body.session_key)
+    # conversation-end 没有 sender_id，所以 owner_id = chat_id（会话 ID）
+    owner_id, _ = _parse_owner_id(None, body.session_key)
     from app.services.message_buffer_service import buffer_message, extract_from_buffer
 
     for msg in body.messages:
@@ -251,15 +313,68 @@ async def handle_conversation_end(body: ConversationEndEvent, db: AsyncSession =
     return ok({"extracted": result["extracted"]})
 
 
-def _parse_owner_id(session_key: str | None) -> str:
-    """从 session_key 解析 owner_id
+def _parse_owner_id(sender_id: str | None, session_key: str | None) -> tuple[str, str]:
+    """获取 owner_id 和 chat_id
 
-    "feishu:chat:oc_xxx" → "oc_xxx"
-    "feishu:p2p:ou_xxx" → "ou_xxx"
+    Returns:
+        (owner_id, chat_id)
+        - owner_id: 用户 ID（ou_xxx）用于隔离用户的记忆
+        - chat_id: 会话 ID（oc_xxx）用于同步到正确的多维表格
+
+    sender_id: "ou_xxx"（用户 open_id）
+    session_key: "feishu:chat:oc_xxx" → owner_id=sender_id, chat_id="oc_xxx"
+                  "feishu:p2p:oc_xxx" → owner_id=sender_id, chat_id="oc_xxx"
     """
-    if not session_key:
-        return "unknown"
-    parts = session_key.split(":")
-    if len(parts) >= 3:
-        return parts[2]
-    return session_key
+    # 从 session_key 解析 chat_id（会话 ID）
+    chat_id = "unknown"
+    if session_key:
+        parts = session_key.split(":")
+        if len(parts) >= 3:
+            chat_id = parts[2]
+            logger.info("session_key 解析: %s → chat_id=%s", session_key, chat_id)
+
+    # owner_id 优先使用 sender_id（真实用户 ID）
+    if sender_id:
+        logger.info("使用 sender_id 作为 owner_id: %s", sender_id)
+        return sender_id, chat_id
+
+    # 降级：没有 sender_id 时，owner_id 使用 chat_id（兼容旧数据）
+    logger.warning("未提供 sender_id，owner_id 使用 chat_id: %s", chat_id)
+    return chat_id, chat_id
+
+
+async def _sync_base_background(chat_id: str, memory, conflict_ids: list[str], session_key: str | None = None, owner_id: str | None = None):
+    """后台执行多维表格同步（ensure + upsert），不阻塞主响应"""
+    try:
+        from app.services.memory_service import get_memory as _get_mem
+        from app.db.session import async_session
+
+        base_config = await feishu_base_service.ensure_base(
+            chat_id, session_key=session_key, owner_id=owner_id
+        )
+        if not base_config:
+            return
+
+        async with async_session() as db:
+            # 同步新记忆
+            ok = await feishu_base_service.upsert_record(memory)
+            # upsert 失败时清除脏缓存并重试一次
+            if not ok:
+                import logging
+                logging.getLogger(__name__).warning("upsert 首次失败，清除缓存重试")
+                await feishu_base_service.invalidate_cache(chat_id)
+                base_config = await feishu_base_service.ensure_base(chat_id)
+                if base_config:
+                    ok = await feishu_base_service.upsert_record(memory)
+            # 同步被覆写的旧记忆
+            for cid in conflict_ids:
+                old_mem = await _get_mem(db, cid)
+                if old_mem:
+                    await feishu_base_service.upsert_record(old_mem)
+            # 首次创建时通过 bridge 发通知
+            if base_config and base_config.get("is_new") and base_config.get("url"):
+                from app.services.feishu_push_service import feishu_push
+                await feishu_push.send_text(chat_id, f"📊 记忆管理面板已创建：{base_config['url']}")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("base 后台同步失败: %s", e)
