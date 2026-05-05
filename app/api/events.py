@@ -36,6 +36,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         await redis_client.set(dedupe_key, "1", ttl_seconds=300)
 
     intent, params = await intent_service.identify_with_llm_fallback(body.content, body.is_mentioned)
+    logger.info("意图识别: intent=%s, is_mentioned=%s, content=%s", intent, body.is_mentioned, body.content[:50])
 
     # --- STORE ---
     if intent == intent_service.Intent.STORE:
@@ -43,6 +44,25 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         extracted = extraction_service.extract_from_command(body.content, scope)
         # 解析 owner_id 和 chat_id
         owner_id, chat_id = _parse_owner_id(body.sender_id, body.session_key)
+
+        # 检查是否需要配置文件夹（首次创建时）
+        from app.services.feishu_base_service import need_folder_config
+
+        need_config = await need_folder_config(chat_id, body.session_key)
+        logger.info("文件夹配置检查: chat_id=%s, need_config=%s", chat_id, need_config)
+
+        if need_config:
+            # 首次使用，主动推送配置卡片
+            from app.services.feishu_base_service import send_folder_config_card
+
+            await send_folder_config_card(chat_id)
+            logger.info("已推送配置卡片: chat_id=%s", chat_id)
+
+            return ok({
+                "action": "none",
+                "reply_text": None,
+                "relevant_memories": [],
+            })
 
         # 预计算 embedding（冲突检测和存储都需要，避免重复 API 调用）
         from app.llm.embedding import encode
@@ -243,6 +263,102 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             "relevant_memories": [],
         })
 
+    # --- CONFIG_FOLDER ---
+    if intent == intent_service.Intent.CONFIG_FOLDER:
+        _, chat_id = _parse_owner_id(body.sender_id, body.session_key)
+        from app.services.feishu_base_service import get_user_folder, set_user_folder, verify_folder_token, clear_user_folder
+
+        # 处理"使用机器人空间"
+        if params.get("use_bot_space"):
+            # 标记为使用机器人空间（保存特殊值表示已配置）
+            await set_user_folder(chat_id, "__bot_space__")
+            return ok({
+                "action": "reply",
+                "reply_text": "✓ 已配置使用机器人空间！\n\n多维表格将创建在机器人的云空间根目录。",
+                "relevant_memories": [],
+                "push_card": None,
+            })
+
+        folder_token = params.get("folder_token")
+
+        # 如果提供了 folder_token，验证并保存
+        if folder_token:
+            if folder_token == "__clear__":
+                # 清除配置，使用默认位置
+                await clear_user_folder(chat_id)
+                return ok({
+                    "action": "reply",
+                    "reply_text": "✓ 已清除文件夹配置，将使用默认位置创建多维表格。",
+                    "relevant_memories": [],
+                    "push_card": None,
+                })
+            if await verify_folder_token(folder_token):
+                await set_user_folder(chat_id, folder_token)
+                return ok({
+                    "action": "reply",
+                    "reply_text": f"✓ 文件夹配置成功！\n\nfolder_token: `{folder_token}`\n\n多维表格将创建在该文件夹下。",
+                    "relevant_memories": [],
+                    "push_card": None,
+                })
+            else:
+                return ok({
+                    "action": "reply",
+                    "reply_text": f"✗ 文件夹 token 无效，请检查后重试。\n\n你输入的: `{folder_token}`\n\n请确保：\n1. token 格式正确（从云空间 URL 复制）\n2. 文件夹存在且机器人有访问权限",
+                    "relevant_memories": [],
+                    "push_card": None,
+                })
+
+        # 否则显示配置卡片
+        current_folder = await get_user_folder(chat_id)
+        if current_folder == "__bot_space__":
+            current_info = "（当前配置：机器人空间）"
+        elif current_folder:
+            current_info = f"（当前配置: `{current_folder}`）"
+        else:
+            current_info = "（当前未配置，将使用默认位置）"
+
+        card = {
+            "header": {
+                "title": {
+                    "content": "📁 配置多维表格文件夹",
+                    "tag": "plain_text"
+                }
+            },
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"""请输入你的飞书云空间文件夹 token，多维表格将创建在该文件夹下。
+
+{current_info}
+
+**如何获取 folder token：**
+1. 打开飞书云空间
+2. 进入目标文件夹
+3. 从 URL 中复制 token，格式如 `Jz0Wwx5AwiqzgKkoSNJc9vk6nFh`
+
+**云空间 URL 示例：**
+```
+https://feishu.cn/drive/folder/Jz0Wwx5AwiqzgKkoSNJc9vk6nFh/...
+```
+folder_token = `Jz0Wwx5AwiqzgKkoSNJc9vk6nFh`
+
+**回复格式：**
+- `@Mneme folder:Jz0Wwx5AwiqzgKkoSNJc9vk6nFh`
+- 或输入 `@Mneme 使用机器人空间`
+"""
+                    }
+                }
+            ]
+        }
+        return ok({
+            "action": "reply",
+            "reply_text": None,
+            "relevant_memories": [],
+            "push_card": card,
+        })
+
     # --- LIST_MY ---
     if intent == intent_service.Intent.LIST_MY:
         owner_id, _ = _parse_owner_id(body.sender_id, body.session_key)
@@ -378,3 +494,48 @@ async def _sync_base_background(chat_id: str, memory, conflict_ids: list[str], s
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("base 后台同步失败: %s", e)
+
+
+@router.post("/card-trigger")
+async def handle_card_trigger(body: dict, db: AsyncSession = Depends(get_db)):
+    """处理飞书卡片回调事件
+
+    飞书卡片表单提交后会触发此回调。
+    """
+    import logging
+    logging.getLogger(__name__).info("卡片回调: %s", body)
+
+    # 解析回调数据
+    token = body.get("token", {})
+    action = body.get("action", {})
+    action_value = action.get("value", {})
+
+    # 获取 chat_id
+    chat_id = token.get("chat_id") or token.get("open_chat_id")
+
+    # 获取表单数据（如果是表单提交）
+    form_value = action.get("form_value", {})
+
+    action_type = action_value.get("action")
+    logging.getLogger(__name__).info("卡片回调 action: %s, chat_id=%s", action_type, chat_id)
+
+    from app.services.feishu_base_service import set_user_folder, verify_folder_token
+
+    # 处理文件夹 token 验证（从表单数据获取）
+    folder_token = form_value.get("folder_token", "")
+    if folder_token and action_type == "confirm_token":
+        if await verify_folder_token(folder_token):
+            await set_user_folder(chat_id, folder_token)
+            return ok({
+                "toast": {
+                    "type": "success",
+                    "content": f"✓ 文件夹配置成功！"
+                }
+            })
+        else:
+            return ok({
+                "toast": {
+                    "type": "error",
+                    "content": "文件夹 token 无效，请检查后重试"
+                }
+            })

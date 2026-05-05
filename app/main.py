@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -71,7 +72,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.warning(f"Buffer cleanup failed (continuing anyway): {e}")
 
+    # 启动飞书长连接客户端（接收卡片回调）
+    try:
+        from app.services.feishu_event_service import start_event_listener
+        event_loop = asyncio.get_event_loop()
+        await start_event_listener(event_loop)
+        logging.info("飞书长连接客户端已启动")
+    except ImportError as e:
+        logging.warning(f"lark-oapi SDK 未安装，卡片回调功能不可用: {e}")
+    except Exception as e:
+        import traceback
+        logging.warning(f"飞书长连接启动失败（卡片回调不可用）: {e}")
+        logging.warning(traceback.format_exc())
+
     yield
+
+    # Shutdown: 停止飞书长连接
+    try:
+        from app.services.feishu_event_service import stop_event_listener
+        await stop_event_listener()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -85,7 +106,8 @@ app = FastAPI(
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     # Skip auth for health check and docs, or when no token configured
-    if request.url.path in ("/health", "/docs", "/openapi.json", "/redoc", "/api/callbacks/card-action"):
+    if request.url.path in ("/health", "/docs", "/openapi.json", "/redoc",
+                             "/api/callbacks/card-action", "/api/callbacks/card-trigger"):
         return await call_next(request)
     if not settings.mneme_service_token:
         return await call_next(request)

@@ -61,6 +61,71 @@ async def handle_card_action(request: Request, db: AsyncSession = Depends(get_db
     return {"code": 0, "msg": "ok"}
 
 
+@router.post("/card-trigger")
+async def handle_card_trigger(request: Request, db: AsyncSession = Depends(get_db)):
+    """处理飞书卡片 2.0 表单回调（schema 2.0）
+
+    飞书卡片 2.0 回调格式:
+    {
+        "token": {"chat_id": "oc_xxx", ...},
+        "action": {"value": {"action": "confirm_token"}, "form_value": {"folder_token": "xxx"}},
+        "operator": {"open_id": "ou_xxx"}
+    }
+    """
+    body = await request.json()
+
+    # 解析回调数据
+    token_data = body.get("token", {})
+    action = body.get("action", {})
+    action_value = action.get("value", {})
+
+    # 获取 chat_id
+    chat_id = token_data.get("chat_id") or token_data.get("open_chat_id")
+
+    # 获取表单数据
+    form_value = action.get("form_value", {})
+    action_type = action_value.get("action")
+
+    logger.info("卡片2.0回调: action=%s, chat_id=%s, form=%s", action_type, chat_id, form_value)
+
+    from app.services.feishu_base_service import set_user_folder, verify_folder_token
+
+    # 处理文件夹 token 验证
+    folder_token = form_value.get("folder_token", "")
+    if folder_token and action_type == "confirm_token":
+        if await verify_folder_token(folder_token):
+            await set_user_folder(chat_id, folder_token)
+            return ok({
+                "toast": {
+                    "type": "success",
+                    "content": f"✓ 文件夹配置成功！\n\n多维表格将创建在该文件夹下。"
+                }
+            })
+        else:
+            return ok({
+                "toast": {
+                    "type": "error",
+                    "content": "文件夹 token 无效，请检查后重试"
+                }
+            })
+
+    return {"code": 0, "msg": "ok"}
+
+
+@router.get("/card-action")
+async def verify_card_url(request: Request):
+    """飞书卡片回调 URL 验证
+
+    飞书在配置卡片回调 URL 时会发送 GET 请求进行验证。
+    返回格式需要包含 challenge 字段。
+    """
+    challenge = request.query_params.get("challenge", "")
+    if challenge:
+        logger.info("飞书卡片 URL 验证挑战: %s", challenge)
+        return {"challenge": challenge}
+    return {"code": 0, "msg": "ok"}
+
+
 async def _handle_review(db: AsyncSession, memory_id: str, chat_id: str, action: str, user_id: str):
     """处理 review/done/dismiss 按钮"""
     try:

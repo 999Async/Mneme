@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 _BASE_KEY_PREFIX = "mneme:base"
 _RECORD_KEY_PREFIX = "mneme:base:record"
 _USER_NAME_PREFIX = "mneme:user:name"
+_FOLDER_KEY_PREFIX = "mneme:folder"
 # TTL: 365 days for base config, 7 days for user name cache
 _PERMANENT_TTL = 365 * 24 * 3600
 _USER_NAME_TTL = 7 * 24 * 3600
@@ -104,6 +106,11 @@ def _sync_lock_key(memory_id: str) -> str:
 def _user_name_cache_key(open_id: str) -> str:
     """用户名缓存 Redis key"""
     return f"{_USER_NAME_PREFIX}:{open_id}"
+
+
+def _folder_cache_key(chat_id: str) -> str:
+    """用户配置的文件夹 token Redis key"""
+    return f"{_FOLDER_KEY_PREFIX}:{chat_id}"
 
 
 async def _get_user_name_by_id(open_id: str) -> str:
@@ -343,10 +350,20 @@ async def ensure_base(chat_id: str, session_key: str | None = None, owner_id: st
         logger.info("私聊场景: chat_id=%s, owner_id=%s", chat_id, owner_id)
 
     # 创建新 Base
-    # - 群聊：使用配置的共享文件夹
+    # - 优先使用用户配置的 folder_token
+    # - 群聊：降级使用全局配置的 FEISHU_BASE_FOLDER_TOKEN
     # - 私聊：不指定 folder_token（创建在机器人空间根目录）
+    user_folder = await get_user_folder(chat_id) or ""
     folder_token = ""
-    if not is_p2p:
+
+    if user_folder == "__bot_space__":
+        # 用户选择使用机器人空间，不指定 folder_token
+        folder_token = ""
+    elif user_folder:
+        # 用户配置了自定义文件夹
+        folder_token = user_folder
+    elif not is_p2p:
+        # 群聊：降级使用全局配置
         folder_token = getattr(settings, "feishu_base_folder_token", "") or ""
 
     create_cmd = [
@@ -915,6 +932,98 @@ async def invalidate_cache(chat_id: str) -> None:
     logger.info("已清除 base 缓存: chat_id=%s", chat_id)
 
 
+async def get_user_folder(chat_id: str) -> str | None:
+    """获取用户配置的文件夹 token"""
+    return await redis_client.get(_folder_cache_key(chat_id))
+
+
+async def set_user_folder(chat_id: str, folder_token: str) -> None:
+    """保存用户配置的文件夹 token"""
+    await redis_client.set(
+        _folder_cache_key(chat_id),
+        folder_token,
+        ttl_seconds=_PERMANENT_TTL,
+    )
+    logger.info("已保存用户文件夹配置: chat_id=%s folder_token=%s", chat_id, folder_token)
+
+
+async def clear_user_folder(chat_id: str) -> None:
+    """清除用户配置的文件夹 token"""
+    await redis_client.delete(_folder_cache_key(chat_id))
+
+
+async def need_folder_config(chat_id: str, session_key: str | None = None) -> bool:
+    """检查是否需要配置文件夹（首次创建时）
+
+    Args:
+        chat_id: 会话 ID
+        session_key: 会话标识，用于判断是私聊还是群聊
+
+    Returns:
+        True 表示需要弹出配置卡片，False 表示已配置或有默认配置
+    """
+    if not settings.feishu_base_enabled:
+        return False
+
+    # 检查是否已有 base 配置或文件夹配置
+    has_base = await redis_client.get(_base_redis_key(chat_id))
+    has_folder = await get_user_folder(chat_id)
+
+    # 已有 base 配置，不需要再配置
+    if has_base:
+        return False
+
+    # 已有文件夹配置，不需要再配置
+    if has_folder:
+        return False
+
+    # 群聊：检查是否有全局配置
+    is_p2p = session_key and session_key.startswith("feishu:p2p:")
+    if not is_p2p:
+        has_global_folder = bool(getattr(settings, "feishu_base_folder_token", ""))
+        if has_global_folder:
+            return False
+
+    # 需要配置：没有 base 且没有文件夹配置（且群聊没有全局配置）
+    return True
+
+
+async def verify_folder_token(folder_token: str) -> bool:
+    """验证文件夹 token 是否有效
+
+    通过调用飞书 API 获取文件夹元数据来验证。
+    API: GET /open-apis/drive/v1/files/{file_token}/meta
+    """
+    token = await _get_tenant_access_token()
+    if not token:
+        logger.warning("无法获取 tenant_access_token")
+        return False
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://open.feishu.cn/open-apis/drive/explorer/v2/folder/{folder_token}/meta",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                params={},
+                timeout=10.0,
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                file_info = data.get("data", {}).get("file", {})
+                name = file_info.get("name", "")
+                logger.info("文件夹验证成功: token=%s name=%s", folder_token, name)
+                return True
+            else:
+                logger.warning("文件夹验证失败: code=%s msg=%s", data.get("code"), data.get("msg"))
+                return False
+    except Exception as e:
+        logger.warning("文件夹验证异常: %s", e)
+        return False
+
+
 async def _get_tenant_access_token() -> str | None:
     """获取飞书 API 的 tenant_access_token"""
     app_id = getattr(settings, "feishu_app_id", "")
@@ -1037,3 +1146,71 @@ async def add_chat_tab(chat_id: str, base_url: str) -> bool:
     except Exception as e:
         logger.warning("添加会话标签页异常: %s", e)
         return False
+
+
+async def load_folder_config_card() -> dict | None:
+    """加载文件夹配置卡片模板
+
+    Returns:
+        卡片 JSON 或 None（加载失败时）
+    """
+    card_path = Path(__file__).parent.parent / "utils" / "cards" / "folder_config1.card"
+    try:
+        with open(card_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            card = json.loads(content)
+            return card
+    except Exception as e:
+        logger.error("加载文件夹配置卡片失败: %s", e)
+        return None
+
+
+async def send_folder_config_card(chat_id: str) -> bool:
+    """发送文件夹配置卡片
+
+    Args:
+        chat_id: 会话 ID
+
+    Returns:
+        True if successful, False otherwise
+    """
+    token = await _get_tenant_access_token()
+    if not token:
+        logger.warning("无法获取 tenant_access_token，跳过发送配置卡片")
+        return False
+
+    card = await load_folder_config_card()
+    if not card:
+        logger.error("无法加载配置卡片")
+        return False
+
+    # 提取 dsl 部分作为消息内容（卡片模板格式包含 name/dsl/variables，但发送消息时只需要 dsl）
+    card_content = card.get("dsl", card)
+    logger.info("准备发送配置卡片: chat_id=%s, card=%s", chat_id, json.dumps(card_content, ensure_ascii=False)[:500])
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://open.feishu.cn/open-apis/im/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"receive_id_type": "chat_id"},
+                json={
+                    "receive_id": chat_id,
+                    "msg_type": "interactive",
+                    "content": json.dumps(card_content),
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == 0:
+                    logger.info("已发送文件夹配置卡片: chat_id=%s", chat_id)
+                    return True
+                else:
+                    logger.warning("发送配置卡片失败: code=%s msg=%s", data.get("code"), data.get("msg"))
+            else:
+                logger.warning("发送配置卡片 HTTP 错误: status=%d, body=%s", resp.status_code, resp.text[:1000])
+    except Exception as e:
+        logger.warning("发送配置卡片异常: %s", e)
+
+    return False
+
