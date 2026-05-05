@@ -134,7 +134,7 @@ FIELDS: list[dict] = [
     {"type": "text", "name": "标签"},
     {"type": "text", "name": "来源"},
     {"type": "text", "name": "父记忆ID"},
-    {"type": "text", "name": "附件", "style": {"type": "url"}},
+    {"type": "text", "name": "附件文档", "style": {"type": "url"}},
 ]
 
 # 飞书默认主字段名（不可删除/重命名），用于存储记忆 ID
@@ -145,9 +145,11 @@ _PRIMARY_FIELD = ""
 async def _detect_primary_field(app_token: str, table_id: str) -> str:
     """从字段列表中检测主字段名称。
 
-    检测策略：
-    1. 找 is_primary=true 的字段
-    2. 若无 is_primary 标记，取字段列表第一个（飞书默认首列即主键）
+    检测策略（按优先级）：
+    1. 找 is_primary=true 的字段（支持多种字段名变体）
+    2. 按名称特征匹配：飞书默认主字段通常是"文本"或"标题"
+    3. 按字段特征匹配：text 类型 + 无特殊样式 + 排在最前面
+    4. 兜底：取字段列表第一个
     """
     result = await _lark_cli_with_retry(
         "base", "+field-list",
@@ -163,15 +165,46 @@ async def _detect_primary_field(app_token: str, table_id: str) -> str:
     if not fields:
         return ""
 
-    # 策略1: 找 is_primary=true
-    for f in fields:
-        if f.get("is_primary", False):
-            field_id = f.get("id", f.get("field_id", ""))
-            return f.get("name", "")
+    # 调试：记录字段结构
+    logger.info("字段列表 (前3个): %s", json.dumps(fields[:3], ensure_ascii=False, indent=2))
 
-    # 策略2: 首列即主键
-    logger.info("未找到 is_primary 字段，首列作为主键")
-    return fields[0].get("name", "")
+    # 策略1: 找 is_primary=true（支持多种可能的字段名）
+    for f in fields:
+        is_primary = f.get("is_primary", f.get("isPrimary", f.get("primary", False)))
+        if is_primary:
+            field_id = f.get("id", f.get("field_id", ""))
+            name = f.get("name", "")
+            logger.info("✓ 策略1: 找到 is_primary 字段: name=%s id=%s", name, field_id)
+            return name
+
+    # 策略2: 按名称特征匹配（飞书默认主字段名）
+    default_primary_names = {"文本", "标题", "Title", "title", "Text", "text", "名称", "Name", "name"}
+    for f in fields:
+        name = f.get("name", "")
+        if name in default_primary_names:
+            field_id = f.get("id", f.get("field_id", ""))
+            logger.info("✓ 策略2: 按名称匹配找到主字段: name=%s id=%s", name, field_id)
+            return name
+
+    # 策略3: 按字段特征匹配（text 类型 + 无特殊样式 + 排在最前）
+    for i, f in enumerate(fields):
+        ftype = f.get("type", "")
+        style = f.get("style", {})
+        # 主字段通常是纯文本类型，无特殊样式
+        if ftype == "text" and not style:
+            name = f.get("name", "")
+            field_id = f.get("id", f.get("field_id", ""))
+            # 优先选择排在前面的 text 字段（前3个）
+            if i < 3:
+                logger.info("✓ 策略3: 按特征匹配找到主字段: name=%s id=%s (位置=%d)", name, field_id, i)
+                return name
+
+    # 策略4: 兜底，首列即主键
+    logger.warning("✗ 策略4: 未找到明确主字段，使用首列作为主键 (可能不准确)")
+    first_name = fields[0].get("name", "")
+    first_id = fields[0].get("id", fields[0].get("field_id", ""))
+    logger.warning("首列字段: name=%s id=%s", first_name, first_id)
+    return first_name
 
 
 async def _rename_primary_field(app_token: str, table_id: str, primary_name: str) -> str | None:
@@ -346,6 +379,7 @@ async def _delete_default_fields(app_token: str, table_id: str, primary_name: st
     """删除飞书默认创建的非主字段（单选、日期、附件等）。
 
     主字段（索引列）不可删除，保留用于存储记忆ID。
+    注意：此函数在创建自定义字段之前调用，应删除所有非主字段的默认字段。
     """
     our_names = {f["name"] for f in FIELDS}
 
@@ -364,15 +398,23 @@ async def _delete_default_fields(app_token: str, table_id: str, primary_name: st
     for field in fields:
         name = field.get("name", "")
         field_id = field.get("id", field.get("field_id", ""))
-        is_primary = field.get("is_primary", False)
+        # 支持多种可能的 is_primary 字段名
+        is_primary = field.get("is_primary", field.get("isPrimary", field.get("primary", False)))
         if not field_id:
             continue
 
-        # 保护主字段：is_primary 标记 + 名称匹配 + 首字段兜底
-        if is_primary or name in our_names or name == primary_name or field == fields[0]:
+        # 只保护主字段：is_primary 标记 + 名称匹配 + 首字段兜底
+        # 不检查 name in our_names，因为此时尚未创建自定义字段
+        if is_primary:
+            logger.info("保护主字段 (is_primary=True): %s (%s)", name, field_id)
+            continue
+        if name in our_names or name == primary_name or field == fields[0]:
+            logger.info("保护字段: %s (%s) - reason: our_names=%s primary_name=%s is_first=%s",
+                       name, field_id, name in our_names, name == primary_name, field == fields[0])
             continue
 
-        # 删除其他默认字段
+        # 删除其他默认字段（包括可能名为"附件"、"单选"等的默认字段）
+        logger.info("尝试删除默认字段: %s (%s)", name, field_id)
         ok = await _lark_cli_with_retry(
             "base", "+field-delete",
             "--base-token", app_token,
@@ -382,9 +424,9 @@ async def _delete_default_fields(app_token: str, table_id: str, primary_name: st
             "--as", "bot",
         )
         if ok:
-            logger.info("已删除默认字段: %s (%s)", name, field_id)
+            logger.info("✓ 已删除默认字段: %s (%s)", name, field_id)
         else:
-            logger.warning("删除默认字段失败: %s (%s)", name, field_id)
+            logger.warning("✗ 删除默认字段失败: %s (%s)", name, field_id)
         await asyncio.sleep(0.5)
 
 
@@ -408,7 +450,8 @@ async def _cleanup_extra_fields(app_token: str, table_id: str, primary_name: str
     for field in fields:
         name = field.get("name", "")
         field_id = field.get("id", field.get("field_id", ""))
-        is_primary = field.get("is_primary", False)
+        # 支持多种可能的 is_primary 字段名
+        is_primary = field.get("is_primary", field.get("isPrimary", field.get("primary", False)))
 
         if not field_id:
             continue
@@ -427,9 +470,9 @@ async def _cleanup_extra_fields(app_token: str, table_id: str, primary_name: str
             "--as", "bot",
         )
         if ok:
-            logger.info("清理多余字段: %s (%s)", name, field_id)
+            logger.info("✓ 清理多余字段: %s (%s)", name, field_id)
         else:
-            logger.warning("清理多余字段失败: %s (%s)", name, field_id)
+            logger.warning("✗ 清理多余字段失败: %s (%s)", name, field_id)
         await asyncio.sleep(0.5)
 
 
@@ -575,6 +618,7 @@ async def upsert_record(memory: Any) -> bool:
     # 获取 base 配置
     # 从 memory.source_chat_id 获取 chat_id
     chat_id = getattr(memory, "source_chat_id", "")
+    owner_id = getattr(memory, "owner_id", "")
     if not chat_id:
         return False
 
@@ -638,13 +682,15 @@ async def upsert_record(memory: Any) -> bool:
         "状态": status,
         "创建时间": created_str,
         "标签": tags_str,
-        "来源": chat_id,
+        "来源": owner_id,
         "父记忆ID": getattr(memory, "parent_id", "") or "",
+        "附件文档": attachment_str
+
     }
 
-    # 只有当有附件时才添加"附件"字段
-    if attachment_str:
-        fields["附件"] = attachment_str
+    # # 只有当有附件时才添加"附件"字段
+    # if attachment_str:
+        # fields["附件"] = attachment_str
 
     cmd = [
         "base", "+record-upsert",

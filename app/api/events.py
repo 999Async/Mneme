@@ -17,6 +17,8 @@ from app.services import feishu_base_service
 
 router = APIRouter()
 
+import logging
+logger = logging.getLogger(__name__)
 
 @router.post("/message")
 async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)):
@@ -39,8 +41,8 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
     if intent == intent_service.Intent.STORE:
         scope = params.get("scope", "personal")
         extracted = extraction_service.extract_from_command(body.content, scope)
-        # 解析 owner_id from session_key (格式: "feishu:chat:oc_xxx" or "feishu:p2p:ou_xxx")
-        owner_id = _parse_owner_id(body.session_key)
+        # 解析 owner_id 和 chat_id
+        owner_id, chat_id = _parse_owner_id(body.sender_id, body.session_key)
 
         # 预计算 embedding（冲突检测和存储都需要，避免重复 API 调用）
         from app.llm.embedding import encode
@@ -49,9 +51,22 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         # 冲突检测（embedding 优先，降级到三路评分）
         result = await detect_conflicts_with_llm(
             db, content=extracted.content, tags=extracted.tags,
-            owner_id=owner_id, scope=scope,
+            owner_id=chat_id, scope=scope,
         )
         conflicts = result["conflicts"]
+        duplicates = result.get("duplicates", [])
+
+        # 如果检测到重复，不创建新记忆
+        if duplicates:
+            duplicate_info = f"（已有 {len(duplicates)} 条相同记忆）"
+            if not result.get("llm_available", True):
+                duplicate_info += "（⚠️ AI 服务暂时不可用，重复检测可能不够准确）"
+            return ok({
+                "action": "reply",
+                "reply_text": f"这条记忆已经存在了，不需要重复记录。{duplicate_info}",
+                "relevant_memories": [],
+                "push_card": None,
+            })
 
         # 创建新记忆（复用预计算的 embedding）
         context_snapshot = {
@@ -64,7 +79,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             content=extracted.content, tags=extracted.tags,
             confidence=extracted.confidence,
             context_snapshot=context_snapshot,
-            source_chat_id=owner_id,
+            source_chat_id=chat_id,  # 使用会话 ID，而不是 owner_id
             source_message_id=body.message_id,
             embedding=pre_embedding,
             attachments=extracted.attachments,
@@ -73,7 +88,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         # 保存上下文快照（best-effort，用于心流恢复）
         try:
             await save_snapshot(
-                db, user_id=owner_id, chat_id=owner_id,
+                db, user_id=owner_id, chat_id=chat_id,  # 使用会话 ID
                 snapshot={"last_content": extracted.content, "session_key": body.session_key},
             )
         except Exception:
@@ -101,7 +116,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
         # 多维表格同步（完全后台，不阻塞响应）
         asyncio.create_task(_sync_base_background(
-            owner_id, memory, [c["id"] for c in conflicts],
+            chat_id, memory, [c["id"] for c in conflicts],  # 使用会话 ID
         ))
 
         return ok({
@@ -116,7 +131,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
     if intent == intent_service.Intent.OVERWRITE:
         scope = params.get("scope", "personal")
         extracted = extraction_service.extract_from_command(body.content, scope)
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, chat_id = _parse_owner_id(body.sender_id, body.session_key)
 
         # 搜索旧记忆
         from app.services.search_service import search_memories
@@ -141,7 +156,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
             content=extracted.content, tags=extracted.tags,
             confidence=extracted.confidence,
             context_snapshot={"raw_content": body.content, "session_key": body.session_key},
-            source_chat_id=owner_id,
+            source_chat_id=chat_id,  # 使用会话 ID
             source_message_id=body.message_id,
             parent_id=old.id,
             attachments=extracted.attachments,
@@ -152,7 +167,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
         # 多维表格同步（后台）
         asyncio.create_task(_sync_base_background(
-            owner_id, new_memory, [old.id],
+            chat_id, new_memory, [old.id],  # 使用会话 ID
         ))
 
         return ok({
@@ -164,7 +179,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
     # --- QUERY ---
     if intent == intent_service.Intent.QUERY:
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, _ = _parse_owner_id(body.sender_id, body.session_key)
         # 清理搜索词：去掉 @提及 + 指令关键词
         import re
         clean = re.sub(r"@\S+\s*", "", body.content)
@@ -199,7 +214,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
     # --- FLOW_RECOVER ---
     if intent == intent_service.Intent.FLOW_RECOVER:
         from app.services.context_service import get_latest_snapshot
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, _ = _parse_owner_id(body.sender_id, body.session_key)
         snapshot = await get_latest_snapshot(db, user_id=owner_id)
         if snapshot:
             return ok({
@@ -215,7 +230,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
     # --- LIST_MY ---
     if intent == intent_service.Intent.LIST_MY:
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, _ = _parse_owner_id(body.sender_id, body.session_key)
         from app.services.memory_service import list_memories
         items, total = await list_memories(db, owner_id=owner_id, active_only=True, page_size=10)
         if items:
@@ -233,7 +248,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
 
     # --- AUTO_EXTRACT (非 @Mneme 消息) → 缓冲 ---
     if intent == intent_service.Intent.AUTO_EXTRACT:
-        owner_id = _parse_owner_id(body.session_key)
+        owner_id, chat_id = _parse_owner_id(body.sender_id, body.session_key)
         from app.services.message_buffer_service import buffer_message, check_count_trigger, extract_from_buffer
         result = await buffer_message(owner_id, body.content, role="user", session_key=body.session_key, message_id=body.message_id)
 
@@ -241,7 +256,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         if result.get("buffered") and len(body.content) >= 5:
             try:
                 await save_snapshot(
-                    db, user_id=owner_id, chat_id=owner_id,
+                    db, user_id=owner_id, chat_id=chat_id,  # 使用会话 ID
                     snapshot={"last_content": body.content, "session_key": body.session_key},
                 )
                 await db.commit()
@@ -266,7 +281,8 @@ async def handle_conversation_end(body: ConversationEndEvent, db: AsyncSession =
     if not body.messages:
         return ok({"extracted": 0})
 
-    owner_id = _parse_owner_id(body.session_key)
+    # conversation-end 没有 sender_id，所以 owner_id = chat_id（会话 ID）
+    owner_id, _ = _parse_owner_id(None, body.session_key)
     from app.services.message_buffer_service import buffer_message, extract_from_buffer
 
     for msg in body.messages:
@@ -282,18 +298,34 @@ async def handle_conversation_end(body: ConversationEndEvent, db: AsyncSession =
     return ok({"extracted": result["extracted"]})
 
 
-def _parse_owner_id(session_key: str | None) -> str:
-    """从 session_key 解析 owner_id
+def _parse_owner_id(sender_id: str | None, session_key: str | None) -> tuple[str, str]:
+    """获取 owner_id 和 chat_id
 
-    "feishu:chat:oc_xxx" → "oc_xxx"
-    "feishu:p2p:ou_xxx" → "ou_xxx"
+    Returns:
+        (owner_id, chat_id)
+        - owner_id: 用户 ID（ou_xxx）用于隔离用户的记忆
+        - chat_id: 会话 ID（oc_xxx）用于同步到正确的多维表格
+
+    sender_id: "ou_xxx"（用户 open_id）
+    session_key: "feishu:chat:oc_xxx" → owner_id=sender_id, chat_id="oc_xxx"
+                  "feishu:p2p:oc_xxx" → owner_id=sender_id, chat_id="oc_xxx"
     """
-    if not session_key:
-        return "unknown"
-    parts = session_key.split(":")
-    if len(parts) >= 3:
-        return parts[2]
-    return session_key
+    # 从 session_key 解析 chat_id（会话 ID）
+    chat_id = "unknown"
+    if session_key:
+        parts = session_key.split(":")
+        if len(parts) >= 3:
+            chat_id = parts[2]
+            logger.info("session_key 解析: %s → chat_id=%s", session_key, chat_id)
+
+    # owner_id 优先使用 sender_id（真实用户 ID）
+    if sender_id:
+        logger.info("使用 sender_id 作为 owner_id: %s", sender_id)
+        return sender_id, chat_id
+
+    # 降级：没有 sender_id 时，owner_id 使用 chat_id（兼容旧数据）
+    logger.warning("未提供 sender_id，owner_id 使用 chat_id: %s", chat_id)
+    return chat_id, chat_id
 
 
 async def _sync_base_background(chat_id: str, memory, conflict_ids: list[str]):

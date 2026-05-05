@@ -4,6 +4,7 @@ from pydantic import BaseModel
 class IncomingEvent(BaseModel):
     """Plugin before_agent_start POST body"""
     session_key: str | None = None
+    sender_id: str | None = None   # 发送者的 open_id（真实用户 ID）
     content: str
     is_mentioned: bool = False
     message_id: str | None = None  # 飞书消息 ID，用于溯源

@@ -235,7 +235,7 @@ def build_search_result_card(title: str, memories: list[dict]) -> dict:
 
 
 # ── Mneme API 客户端 ──────────────────────────────────────────────────
-async def forward_to_mneme(client: httpx.AsyncClient, session_key: str, content: str, is_mentioned: bool, message_id: str = "", event_id: str = "") -> dict | None:
+async def forward_to_mneme(client: httpx.AsyncClient, session_key: str, content: str, is_mentioned: bool, message_id: str = "", event_id: str = "", sender_id: str = "") -> dict | None:
     """POST 到 Mneme /api/events/message"""
     payload = {
         "session_key": session_key,
@@ -246,6 +246,8 @@ async def forward_to_mneme(client: httpx.AsyncClient, session_key: str, content:
         payload["message_id"] = message_id
     if event_id:
         payload["event_id"] = event_id
+    if sender_id:
+        payload["sender_id"] = sender_id
     try:
         resp = await client.post(
             f"{MNEME_URL}/api/events/message",
@@ -333,13 +335,14 @@ async def process_event(client: httpx.AsyncClient, event: dict):
     is_mentioned = detect_mention(content, chat_type, event)
     chat_id = event["chat_id"]
     message_id = event.get("message_id", "")
+    sender_id = event.get("sender_id", "")  # 获取发送者 ID
 
     log.info("收到消息 [%s] %s (mention=%s): %s", chat_type, chat_id, is_mentioned, content[:80])
 
     # 构建 event_id 用于幂等去重（飞书事件用 message_id 即可，同一消息不会有两个 message_id）
     event_id = event.get("event_id", "") or message_id
 
-    result = await forward_to_mneme(client, session_key, content, is_mentioned, message_id, event_id)
+    result = await forward_to_mneme(client, session_key, content, is_mentioned, message_id, event_id, sender_id)
     if not result or not result.get("ok"):
         log.warning("Mneme 返回异常: %s", result)
         return
