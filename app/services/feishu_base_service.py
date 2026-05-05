@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 # Redis key 前缀
 _BASE_KEY_PREFIX = "mneme:base"
 _RECORD_KEY_PREFIX = "mneme:base:record"
-# TTL: 365 days for base config
+_USER_NAME_PREFIX = "mneme:user:name"
+# TTL: 365 days for base config, 7 days for user name cache
 _PERMANENT_TTL = 365 * 24 * 3600
+_USER_NAME_TTL = 7 * 24 * 3600
 
 # 可重试的并发冲突错误码
 _RETRYABLE_ERRORS = {1254291, 1254607}
@@ -99,6 +101,88 @@ def _sync_lock_key(memory_id: str) -> str:
     return f"{_RECORD_KEY_PREFIX}:sync_lock:{memory_id}"
 
 
+def _user_name_cache_key(open_id: str) -> str:
+    """用户名缓存 Redis key"""
+    return f"{_USER_NAME_PREFIX}:{open_id}"
+
+
+async def _get_user_name_by_id(open_id: str) -> str:
+    """根据 open_id 查询用户名，带缓存。
+
+    尝试两种方式获取用户名：
+    1. lark-cli contact +search-user --as user（需要 user 身份登录，返回 localized_name）
+    2. 飞书原生 API（需要 contact:user.base:readonly 权限，返回 name）
+
+    Args:
+        open_id: 用户 open_id
+
+    Returns:
+        用户名（失败返回原 open_id）
+    """
+    if not open_id:
+        return ""
+
+    # 检查 Redis 缓存
+    cached = await redis_client.get(_user_name_cache_key(open_id))
+    if cached:
+        logger.debug("用户名缓存命中: open_id=%s → name=%s", open_id, cached)
+        return cached
+
+    # 方式1: 尝试使用 lark-cli user 身份（返回 localized_name）
+    result = await _lark_cli_with_retry(
+        "contact", "+search-user",
+        "--user-ids", open_id,
+        "--as", "user",
+    )
+
+    if result:
+        users = result.get("users", [])
+        if users and isinstance(users, list):
+            user = users[0]
+            name = user.get("localized_name", "")
+            if name:
+                await redis_client.set(
+                    _user_name_cache_key(open_id),
+                    name,
+                    ttl_seconds=_USER_NAME_TTL,
+                )
+                logger.info("✓ 查询到用户名 (lark-cli user): open_id=%s → name=%s", open_id, name)
+                return name
+
+    # 方式2: 尝试使用飞书 API（返回 name）
+    token = await _get_tenant_access_token()
+    if token:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"https://open.feishu.cn/open-apis/contact/v3/users/{open_id}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    params={"user_id_type": "open_id"},
+                    timeout=10.0,
+                )
+                data = resp.json()
+                if data.get("code") == 0:
+                    user = data.get("data", {}).get("user", {})
+                    name = user.get("name", "")
+                    if name:
+                        await redis_client.set(
+                            _user_name_cache_key(open_id),
+                            name,
+                            ttl_seconds=_USER_NAME_TTL,
+                        )
+                        logger.info("✓ 查询到用户名 (Feishu API): open_id=%s → name=%s", open_id, name)
+                        return name
+        except Exception as e:
+            logger.warning("调用飞书 API 查询用户名异常: %s", e)
+
+    # 两种方式都失败，返回原 open_id
+    logger.warning("无法查询用户名，使用原 open_id: %s", open_id)
+    return open_id
+
+
 # ── 字段定义 ────────────────────────────────────────────────────────────
 
 # 飞书支持的字段类型白名单
@@ -120,6 +204,11 @@ FIELDS: list[dict] = [
     },
     {"type": "text", "name": "内容"},
     {"type": "number", "name": "版本"},
+    {"type": "datetime", "name": "创建时间", "style": {"format": "yyyy-MM-dd HH:mm"}},
+    {"type": "text", "name": "标签"},
+    {"type": "text", "name": "附件文档", "style": {"type": "url"}},
+    {"type": "text", "name": "来源"},
+    {"type": "text", "name": "父记忆ID"},
     {
         "type": "select",
         "name": "状态",
@@ -130,11 +219,6 @@ FIELDS: list[dict] = [
             {"name": "deleted", "hue": "Gray", "lightness": "Standard"},
         ],
     },
-    {"type": "datetime", "name": "创建时间", "style": {"format": "yyyy-MM-dd HH:mm"}},
-    {"type": "text", "name": "标签"},
-    {"type": "text", "name": "来源"},
-    {"type": "text", "name": "父记忆ID"},
-    {"type": "text", "name": "附件文档", "style": {"type": "url"}},
 ]
 
 # 飞书默认主字段名（不可删除/重命名），用于存储记忆 ID
@@ -414,7 +498,6 @@ async def _delete_default_fields(app_token: str, table_id: str, primary_name: st
             continue
 
         # 删除其他默认字段（包括可能名为"附件"、"单选"等的默认字段）
-        logger.info("尝试删除默认字段: %s (%s)", name, field_id)
         ok = await _lark_cli_with_retry(
             "base", "+field-delete",
             "--base-token", app_token,
@@ -622,6 +705,9 @@ async def upsert_record(memory: Any) -> bool:
     if not chat_id:
         return False
 
+    # 查询用户名（来源字段显示用户名而非 open_id）
+    source_name = await _get_user_name_by_id(owner_id) if owner_id else ""
+
     base_config = await _get_base_config(chat_id)
     if not base_config:
         return False
@@ -677,15 +763,14 @@ async def upsert_record(memory: Any) -> bool:
     fields = {
         primary_name: memory.id,  # 动态检测的主字段存储记忆ID
         "类型": getattr(memory, "type", "fact"),
-        "内容": getattr(memory, "content", "")[:500],  # 截断过长内容
+        "内容": getattr(memory, "content", ""),
         "版本": getattr(memory, "version", 1),
-        "状态": status,
         "创建时间": created_str,
         "标签": tags_str,
-        "来源": owner_id,
+        "附件文档": attachment_str,
+        "来源": source_name,  # 显示用户名而非 open_id
         "父记忆ID": getattr(memory, "parent_id", "") or "",
-        "附件文档": attachment_str
-
+        "状态": status,
     }
 
     # # 只有当有附件时才添加"附件"字段
