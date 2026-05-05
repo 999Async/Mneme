@@ -300,6 +300,11 @@ async def ensure_base(chat_id: str) -> dict | None:
 
     logger.info("多维表格创建成功: app_token=%s table_id=%s url=%s", app_token, table_id, base_url)
     base_config["is_new"] = True
+
+    # Add chat tab (best-effort, silent failure)
+    if base_url:
+        await add_chat_tab(chat_id, base_url)
+
     return base_config
 
 
@@ -790,3 +795,51 @@ async def _find_record_id_by_api(
     except Exception as e:
         logger.warning("record-search API 调用异常: %s", e)
         return None
+
+
+async def add_chat_tab(chat_id: str, base_url: str) -> bool:
+    """Add Feishu Base as a group chat tab.
+
+    Best-effort operation: logs errors but returns False on failure.
+    Base creation continues regardless of chat tab success/failure.
+
+    Args:
+        chat_id: Group chat ID (e.g., "oc_xxx")
+        base_url: Feishu Base URL
+
+    Returns:
+        True if successful, False otherwise
+    """
+    token = await _get_tenant_access_token()
+    if not token:
+        logger.warning("无法获取 tenant_access_token，跳过添加会话标签页")
+        return False
+
+    url = f"https://open.feishu.cn/open-apis/im/v1/chats/{chat_id}/chat_tabs"
+    payload = {
+        "chat_tabs": [
+            {
+                "tab_name": "团队记忆",
+                "tab_type": "doc",
+                "tab_content": {"doc": base_url}
+            }
+        ]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                logger.info("已添加会话标签页: chat_id=%s url=%s", chat_id, base_url)
+                return True
+            else:
+                logger.warning("添加会话标签页失败: code=%s msg=%s", data.get("code"), data.get("msg"))
+                return False
+    except Exception as e:
+        logger.warning("添加会话标签页异常: %s", e)
+        return False
