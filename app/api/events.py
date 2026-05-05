@@ -48,22 +48,35 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         from app.llm.embedding import encode
         pre_embedding = await encode(extracted.content)
 
+        # 去重检测（优先于冲突检测，使用 0.95 高阈值）
+        from app.services.conflict_service import detect_duplicates
+        exact_duplicates = await detect_duplicates(
+            db, content=extracted.content, owner_id=owner_id, scope=scope,
+        )
+        if exact_duplicates:
+            dup_ids = ", ".join([d["id"] for d in exact_duplicates])  # 只显示前 8 位
+            return ok({
+                "action": "reply",
+                "reply_text": f"这条记忆已经存在了哦~",
+                "relevant_memories": [],
+                "push_card": None,
+            })
+
         # 冲突检测（embedding 优先，降级到三路评分）
         result = await detect_conflicts_with_llm(
             db, content=extracted.content, tags=extracted.tags,
-            owner_id=chat_id, scope=scope,
+            owner_id=owner_id, scope=scope,
         )
         conflicts = result["conflicts"]
-        duplicates = result.get("duplicates", [])
+        llm_duplicates = result.get("duplicates", [])
 
-        # 如果检测到重复，不创建新记忆
-        if duplicates:
-            duplicate_info = f"（已有 {len(duplicates)} 条相同记忆）"
-            if not result.get("llm_available", True):
-                duplicate_info += "（⚠️ AI 服务暂时不可用，重复检测可能不够准确）"
+        # LLM 判定的重复
+        if llm_duplicates:
+            dup_ids = ", ".join([d["id"][:8] for d in llm_duplicates])
+            dup_reasons = "; ".join([d.get("llm_reason", "语义相同") for d in llm_duplicates])
             return ok({
                 "action": "reply",
-                "reply_text": f"这条记忆已经存在了，不需要重复记录。{duplicate_info}",
+                "reply_text": f"这条记忆与已有记忆语义相同，不需要重复记录哦~ 记忆ID: {dup_ids}",
                 "relevant_memories": [],
                 "push_card": None,
             })
