@@ -121,7 +121,14 @@ async def auth_middleware(request: Request, call_next):
 # Health check
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    status = {"ok": True}
+    # 添加长连接状态
+    try:
+        from app.services.feishu_event_service import is_running
+        status["feishu_ws"] = "connected" if is_running() else "disconnected"
+    except ImportError:
+        status["feishu_ws"] = "not_available"
+    return status
 
 
 # Register routers

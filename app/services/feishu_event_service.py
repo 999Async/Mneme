@@ -177,9 +177,11 @@ def start_ws_client_sync():
 
     if not app_id or not app_secret:
         logger.error("飞书 app_id 或 app_secret 未配置，无法启动长连接")
+        _running = False
         return
 
-    logger.info("启动飞书长连接客户端: app_id=%s", app_id)
+    logger.info("启动飞书长连接客户端: app_id=%s, app_secret=%s", app_id, app_secret[:10] + "...")
+    logger.info("lark-oapi SDK version: %s", lark.__version__ if hasattr(lark, '__version__') else 'unknown')
 
     event_handler = create_event_handler()
 
@@ -195,11 +197,14 @@ def start_ws_client_sync():
         _running = True
 
         # 启动客户端（阻塞）
-        logger.info("飞书长连接正在连接...")
+        logger.info("飞书长连接正在连接到飞书服务器...")
         _ws_client.start()
 
     except Exception as e:
         logger.error("飞书长连接启动失败: %s", e)
+        logger.error("请检查: 1) app_id 和 app_secret 是否正确")
+        logger.error("        2) 网络是否可以访问飞书服务器")
+        logger.error("        3) 飞书开发者后台是否已启用 '使用长连接接收事件'")
         _running = False
 
 
@@ -218,18 +223,23 @@ async def start_event_listener(event_loop=None):
         return
 
     _event_loop = event_loop or asyncio.get_event_loop()
+    logger.info("准备启动飞书长连接客户端...")
 
     # 在单独线程中运行长连接客户端
     thread = threading.Thread(target=start_ws_client_sync, daemon=True, name="feishu-ws-client")
     thread.start()
 
-    # 等待连接启动
-    await asyncio.sleep(2)
+    # 等待连接启动（最多等待 10 秒）
+    for i in range(10):
+        await asyncio.sleep(1)
+        if _running:
+            logger.info("飞书长连接事件监听器已启动 (等待 %d 秒后连接成功)", i + 1)
+            return
 
-    if _running:
-        logger.info("飞书长连接事件监听器已启动")
-    else:
-        logger.error("飞书长连接启动失败")
+    # 超时后仍未连接
+    logger.error("飞书长连接启动失败: 等待 10 秒后仍未连接成功")
+    logger.error("请检查: 1) feishu_app_id 和 feishu_app_secret 是否正确配置")
+    logger.error("        2) 飞书开发者后台是否已启用 '使用长连接接收事件'")
 
 
 async def stop_event_listener():
