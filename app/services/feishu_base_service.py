@@ -315,8 +315,14 @@ async def _rename_primary_field(app_token: str, table_id: str, primary_name: str
 # ── 核心 API ────────────────────────────────────────────────────────────
 
 
-async def ensure_base(chat_id: str) -> dict | None:
-    """确保多维表格存在。返回 {app_token, table_id, url, is_new} 或 None。"""
+async def ensure_base(chat_id: str, session_key: str | None = None, owner_id: str | None = None) -> dict | None:
+    """确保多维表格存在。返回 {app_token, table_id, url, is_new} 或 None。
+
+    Args:
+        chat_id: 会话 ID（oc_xxx）
+        session_key: 会话标识，格式 "feishu:chat:oc_xxx"（群聊）或 "feishu:p2p:oc_xxx"（私聊）
+        owner_id: 用户 ID（ou_xxx），私聊场景需要用于添加协作者权限
+    """
     if not settings.feishu_base_enabled:
         return None
 
@@ -330,8 +336,19 @@ async def ensure_base(chat_id: str) -> dict | None:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # 创建新 Base（使用配置的共享文件夹，否则默认空间）
-    folder_token = getattr(settings, "feishu_base_folder_token", "") or ""
+    # 判断会话类型：私聊还是群聊
+    is_p2p = False
+    if session_key and session_key.startswith("feishu:p2p:"):
+        is_p2p = True
+        logger.info("私聊场景: chat_id=%s, owner_id=%s", chat_id, owner_id)
+
+    # 创建新 Base
+    # - 群聊：使用配置的共享文件夹
+    # - 私聊：不指定 folder_token（创建在机器人空间根目录）
+    folder_token = ""
+    if not is_p2p:
+        folder_token = getattr(settings, "feishu_base_folder_token", "") or ""
+
     create_cmd = [
         "base", "+base-create",
         "--name", "Mneme 记忆管理",
@@ -400,7 +417,11 @@ async def ensure_base(chat_id: str) -> dict | None:
     await _configure_default_view_group(app_token, table_id)
 
     # 给群聊成员授予编辑权限
-    await _grant_edit_access(app_token, chat_id)
+    if not is_p2p:
+        await _grant_edit_access(app_token, chat_id)
+    elif owner_id:
+        # 私聊场景：为用户添加协作者权限
+        await _grant_user_access(app_token, owner_id)
 
     # 存入 Redis（含 primary_name，不含 is_new）
     base_config = {
@@ -457,6 +478,48 @@ async def _grant_edit_access(app_token: str, chat_id: str) -> None:
                 logger.warning("授权群聊 API 返回 %d: %s", resp.status_code, resp.text[:200])
     except Exception as e:
         logger.warning("授权群聊异常: %s", e)
+
+
+async def _grant_user_access(app_token: str, user_id: str) -> None:
+    """为用户授予多维表格的可管理权限（私聊场景）
+
+    通过飞书 Drive 权限 API 添加用户为协作者。
+    API: POST /open-apis/drive/v1/permissions/{token}/members?type=bitable
+
+    Args:
+        app_token: 多维表格 token
+        user_id: 用户 open_id（ou_xxx）
+    """
+    import httpx
+
+    token = await _get_tenant_access_token()
+    if not token:
+        logger.warning("无法获取 tenant_access_token，跳过用户授权")
+        return
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"https://open.feishu.cn/open-apis/drive/v1/permissions/{app_token}/members",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"type": "bitable"},
+                json={
+                    "member_type": "openid",
+                    "member_id": user_id,
+                    "type": "user",
+                    "perm": "full_access",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == 0:
+                    logger.info("已授予用户 %s 可管理权限", user_id)
+                else:
+                    logger.warning("授权用户失败: code=%s msg=%s", data.get("code"), data.get("msg"))
+            else:
+                logger.warning("授权用户 API 返回 %d: %s", resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("授权用户异常: %s", e)
 
 
 async def _delete_default_fields(app_token: str, table_id: str, primary_name: str) -> None:

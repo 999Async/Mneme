@@ -130,6 +130,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         # 多维表格同步（完全后台，不阻塞响应）
         asyncio.create_task(_sync_base_background(
             chat_id, memory, [c["id"] for c in conflicts],  # 使用会话 ID
+            session_key=body.session_key, owner_id=owner_id,
         ))
 
         return ok({
@@ -181,6 +182,7 @@ async def handle_message(body: IncomingEvent, db: AsyncSession = Depends(get_db)
         # 多维表格同步（后台）
         asyncio.create_task(_sync_base_background(
             chat_id, new_memory, [old.id],  # 使用会话 ID
+            session_key=body.session_key, owner_id=owner_id,
         ))
 
         return ok({
@@ -341,13 +343,15 @@ def _parse_owner_id(sender_id: str | None, session_key: str | None) -> tuple[str
     return chat_id, chat_id
 
 
-async def _sync_base_background(chat_id: str, memory, conflict_ids: list[str]):
+async def _sync_base_background(chat_id: str, memory, conflict_ids: list[str], session_key: str | None = None, owner_id: str | None = None):
     """后台执行多维表格同步（ensure + upsert），不阻塞主响应"""
     try:
         from app.services.memory_service import get_memory as _get_mem
         from app.db.session import async_session
 
-        base_config = await feishu_base_service.ensure_base(chat_id)
+        base_config = await feishu_base_service.ensure_base(
+            chat_id, session_key=session_key, owner_id=owner_id
+        )
         if not base_config:
             return
 
