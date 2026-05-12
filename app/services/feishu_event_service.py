@@ -157,8 +157,8 @@ def create_event_handler():
 
     handler = lark.EventDispatcherHandler.builder("", "") \
         .register_p2_card_action_trigger(do_card_action_trigger) \
-        .register_p1_im_message_receive_v1(handle_message_receive_v1) \
-        .register_p1_im_message_message_read_v1(handle_message_read_v1) \
+        .register_p2_im_message_receive_v1(handle_message_receive_v1) \
+        .register_p2_im_message_message_read_v1(handle_message_read_v1) \
         .build()
 
     logger.info("飞书事件处理器创建成功")
@@ -191,7 +191,8 @@ def start_ws_client_sync():
             app_id,
             app_secret,
             event_handler=event_handler,
-            log_level=lark.LogLevel.INFO
+            log_level=lark.LogLevel.DEBUG,
+            auto_reconnect=True
         )
 
         _running = True
